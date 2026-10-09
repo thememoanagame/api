@@ -24,13 +24,18 @@ public enum GameStatus
     Finished
 }
 
-public sealed record CreateRoomRequest(GameMode Mode, GameDifficulty Difficulty);
+public sealed record ThemeSummary(string Id, string Name, bool Available, int CardCount, IReadOnlyList<GameDifficulty> SupportedDifficulties, string? PreviewReference);
+public sealed record DifficultyOption(GameDifficulty Difficulty, int PairCount, int CardCount);
+public sealed record CreateRoomRequest(GameMode Mode, GameDifficulty Difficulty, string? ThemeId = null);
 
 public sealed record CreateRoomResponse(
     string RoomId,
     GameMode Mode,
     GameDifficulty Difficulty,
-    GameStatus Status);
+    GameStatus Status,
+    string ThemeId,
+    int PairCount,
+    int CardCount);
 
 public sealed record JoinRoomResponse(
     string RoomId,
@@ -39,11 +44,13 @@ public sealed record JoinRoomResponse(
     GameMode Mode,
     GameDifficulty Difficulty,
     GameStatus Status,
+    string ThemeId,
+    int PairCount,
     IReadOnlyList<CardView> Board,
     string? CurrentTurn);
 
-public sealed record AssetManifest(string RoomId, IReadOnlyList<AssetManifestEntry> Assets);
-public sealed record AssetManifestEntry(string AssetToken, string ContentType, long Size);
+public sealed record AssetManifest(string RoomId, string ThemeId, int PairCount, IReadOnlyList<AssetManifestEntry> Assets);
+public sealed record AssetManifestEntry(string AssetToken, string ContentType, long Size, string Reference);
 
 public sealed record CardView(
     int Position,
@@ -56,6 +63,7 @@ public sealed record GameState(
     GameMode Mode,
     GameDifficulty Difficulty,
     GameStatus Status,
+    string ThemeId,
     IReadOnlyList<string> Players,
     IReadOnlyList<CardView> Board,
     string? CurrentTurn,

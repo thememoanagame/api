@@ -4,6 +4,8 @@ namespace memoana.Services.Abstract;
 
 public interface IGameService
 {
+    IReadOnlyList<ThemeSummary> ListThemes();
+    IReadOnlyList<DifficultyOption> ListDifficulties();
     GameOperationResult CreateRoom(CreateRoomRequest request);
     GameOperationResult JoinRoom(string roomId, string playerId);
     GameOperationResult AssetsReady(string roomId, string playerId);
@@ -12,5 +14,7 @@ public interface IGameService
     AssetManifest? GetAssetManifest(string roomId, string accessToken);
     (byte[] Content, string ContentType)? GetAsset(string roomId, string accessToken, string token);
     GameState? GetState(string roomId);
+    GameState? GetState(string roomId, string accessToken);
+    GameState? GetStateForPlayer(string roomId, string playerId);
     IReadOnlyList<RoomEvents> ExpireDueRooms();
 }

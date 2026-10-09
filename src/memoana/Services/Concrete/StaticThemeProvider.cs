@@ -1,4 +1,5 @@
 using System.Text.Json;
+using memoana.Contracts;
 using memoana.Services.Abstract;
 
 namespace memoana.Services.Concrete;
@@ -6,14 +7,38 @@ namespace memoana.Services.Concrete;
 /// <summary>Reads the generated static theme contract from the checked-out themes submodule.</summary>
 public sealed class StaticThemeProvider(IConfiguration configuration, IWebHostEnvironment environment) : IThemeProvider
 {
+    public string? DefaultThemeId => configuration["Themes:DefaultTheme"];
+    public IReadOnlyList<ThemeSummary> ListThemes()
+    {
+        var root = GetRoot();
+        var catalogPath = Path.Combine(root, "data", "themes.json");
+        if (!File.Exists(catalogPath)) throw new InvalidOperationException("The generated theme catalog is missing.");
+        using var catalog = JsonDocument.Parse(File.ReadAllText(catalogPath));
+        return catalog.RootElement.GetProperty("themes").EnumerateArray().Select(entry =>
+        {
+            var id = entry.GetProperty("id").GetString()!;
+            var manifestPath = Path.Combine(root, "data", id, "manifest.json");
+            var cardsPath = Path.Combine(root, "data", id, "cards.json");
+            if (!Guid.TryParse(id, out _) || !File.Exists(manifestPath) || !File.Exists(cardsPath)) return null;
+            using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+            var count = manifest.RootElement.GetProperty("cardCount").GetInt32();
+            var supported = Enum.GetValues<GameDifficulty>().Where(d => PairCount(d) <= count).ToArray();
+            return new ThemeSummary(id, entry.GetProperty("name").GetString() ?? id, true, count, supported, entry.TryGetProperty("url", out var preview) ? preview.GetString() : null);
+        }).Where(x => x is not null).Cast<ThemeSummary>().OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
     public IReadOnlyList<ThemeAsset> SelectAssets(int count)
     {
         if (count <= 0) throw new ArgumentOutOfRangeException(nameof(count));
         var themeId = configuration["Themes:DefaultTheme"] ?? throw new InvalidOperationException("Themes:DefaultTheme is required.");
-        if (!Guid.TryParse(themeId, out var parsedThemeId)) throw new InvalidOperationException($"The configured theme id '{themeId}' is not a GUID.");
-        var configuredRoot = configuration["Themes:RootPath"] ?? throw new InvalidOperationException("Themes:RootPath must point to the local themes submodule.");
-        var root = Path.GetFullPath(Path.IsPathRooted(configuredRoot) ? configuredRoot : Path.Combine(environment.ContentRootPath, configuredRoot));
-        if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"The local themes root does not exist: {root}");
+        return SelectAssets(themeId, count);
+    }
+
+    public IReadOnlyList<ThemeAsset> SelectAssets(string themeId, int count)
+    {
+        if (count <= 0) throw new ArgumentOutOfRangeException(nameof(count));
+        if (!Guid.TryParse(themeId, out var parsedThemeId)) throw new InvalidOperationException($"The theme id '{themeId}' is not a GUID.");
+        var root = GetRoot();
 
         var canonicalThemeId = parsedThemeId.ToString("D");
         var themeRoot = Path.Combine(root, "assets", canonicalThemeId);
@@ -48,4 +73,20 @@ public sealed class StaticThemeProvider(IConfiguration configuration, IWebHostEn
         }).ToArray();
         return available.OrderBy(_ => Random.Shared.Next()).Take(count).ToArray();
     }
+
+    private string GetRoot()
+    {
+        var configuredRoot = configuration["Themes:RootPath"] ?? throw new InvalidOperationException("Themes:RootPath must point to the local themes submodule.");
+        var root = Path.GetFullPath(Path.IsPathRooted(configuredRoot) ? configuredRoot : Path.Combine(environment.ContentRootPath, configuredRoot));
+        if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"The local themes root does not exist: {root}");
+        return root;
+    }
+
+    private static int PairCount(GameDifficulty difficulty) => difficulty switch
+    {
+        GameDifficulty.Easy => 6,
+        GameDifficulty.Medium => 10,
+        GameDifficulty.Hard => 15,
+        _ => 0
+    };
 }

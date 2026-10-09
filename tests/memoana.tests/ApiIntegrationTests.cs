@@ -62,6 +62,16 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiFactory>
         invalid.Headers.Add("X-Player-Token", joined.PlayerId);
         Assert.Equal(HttpStatusCode.NotFound, (await client.SendAsync(invalid)).StatusCode);
     }
+
+    [Fact]
+    public async Task RoomStateRequiresTheParticipationToken()
+    {
+        using var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("api/game/rooms", new { Mode = "Time", Difficulty = "Easy" });
+        var room = (await create.Content.ReadFromJsonAsync<CreateRoomResponse>(Json))!;
+
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"api/game/rooms/{room.RoomId}")).StatusCode);
+    }
 }
 
 public sealed class ApiFactory : WebApplicationFactory<Program>

@@ -35,14 +35,18 @@ public sealed class GameHub(IGameService gameService) : Hub
     public async Task<GameOperationResult> AssetsReady(string roomId)
     {
         var result = gameService.AssetsReady(roomId, Context.ConnectionId);
-        if (result.Succeeded) await Publish(roomId, result.Events);
+        if (!result.Succeeded) return await Reject(result);
+        await Publish(roomId, result.Events);
         return result;
     }
+
+    public Task<GameState?> GetState(string roomId) => Task.FromResult(gameService.GetStateForPlayer(roomId, Context.ConnectionId));
 
     public async Task<GameOperationResult> FlipCard(string roomId, int position)
     {
         var result = gameService.FlipCard(roomId, Context.ConnectionId, position);
-        if (result.Succeeded) await Publish(roomId, result.Events);
+        if (!result.Succeeded) return await Reject(result);
+        await Publish(roomId, result.Events);
         return result;
     }
 

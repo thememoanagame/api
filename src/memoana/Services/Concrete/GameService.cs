@@ -34,18 +34,32 @@ public sealed class GameService : IGameService
 
     public GameService(IThemeProvider themeProvider) => _themeProvider = themeProvider;
 
+    public IReadOnlyList<ThemeSummary> ListThemes() => _themeProvider.ListThemes();
+
+    public IReadOnlyList<DifficultyOption> ListDifficulties() => PairCounts.Select(x => new DifficultyOption(x.Key, x.Value, x.Value * 2)).ToArray();
+
     public GameOperationResult CreateRoom(CreateRoomRequest request)
     {
-        if (!PairCounts.ContainsKey(request.Difficulty))
+        if (!Enum.IsDefined(request.Mode))
+            return GameOperationResult.Failure("invalid_mode", "Game mode is not supported.");
+        if (!PairCounts.TryGetValue(request.Difficulty, out var pairCount))
             return GameOperationResult.Failure("invalid_difficulty", "Difficulty is not supported.");
 
-        var room = new Room(CreateRoomId(), request.Mode, request.Difficulty);
+        var themes = _themeProvider.ListThemes();
+        var themeId = request.ThemeId ?? _themeProvider.DefaultThemeId ?? themes.FirstOrDefault()?.Id ?? "default";
+        var theme = themes.FirstOrDefault(x => string.Equals(x.Id, themeId, StringComparison.OrdinalIgnoreCase));
+        if (themes.Count > 0 && theme is null)
+            return GameOperationResult.Failure("theme_not_found", "The requested theme does not exist or is unavailable.");
+        if (theme is not null && (!theme.Available || theme.CardCount < pairCount))
+            return GameOperationResult.Failure(theme.Available ? "theme_insufficient_content" : "theme_unavailable", "The selected theme cannot support this difficulty.");
+
+        var room = new Room(CreateRoomId(), request.Mode, request.Difficulty, themeId);
         lock (_roomsGate)
         {
             _rooms.Add(room.RoomId, room);
         }
 
-        return GameOperationResult.Success(new CreateRoomResponse(room.RoomId, room.Mode, room.Difficulty, room.Status));
+        return GameOperationResult.Success(new CreateRoomResponse(room.RoomId, room.Mode, room.Difficulty, room.Status, room.ThemeId, pairCount, pairCount * 2));
     }
 
     public GameOperationResult JoinRoom(string roomId, string playerId)
@@ -182,6 +196,20 @@ public sealed class GameService : IGameService
         lock (room.Gate) return ToState(room);
     }
 
+    public GameState? GetState(string roomId, string accessToken)
+    {
+        var room = FindRoom(roomId);
+        if (room is null) return null;
+        lock (room.Gate) return FindPlayerByToken(room, accessToken) is null ? null : ToState(room);
+    }
+
+    public GameState? GetStateForPlayer(string roomId, string playerId)
+    {
+        var room = FindRoom(roomId);
+        if (room is null) return null;
+        lock (room.Gate) return room.Players.Contains(playerId) ? ToState(room) : null;
+    }
+
     public IReadOnlyList<RoomEvents> ExpireDueRooms()
     {
         var expired = new List<RoomEvents>();
@@ -270,13 +298,13 @@ public sealed class GameService : IGameService
         room.Status = GameStatus.Preparing;
         events.Add(new("GamePreparing", new { room.RoomId }));
         var pairCount = PairCounts[room.Difficulty];
-        var selected = _themeProvider.SelectAssets(pairCount);
+        var selected = _themeProvider.SelectAssets(room.ThemeId, pairCount);
         if (selected.Count < pairCount) throw new InvalidOperationException("The theme does not contain enough playable assets.");
         foreach (var asset in selected)
         {
             var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
             room.Assets[token] = asset;
-            room.PublicAssets.Add(new AssetManifestEntry(token, asset.ContentType, asset.Content.LongLength));
+            room.PublicAssets.Add(new AssetManifestEntry(token, asset.ContentType, asset.Content.LongLength, $"/api/game/rooms/{room.RoomId}/assets/{token}"));
             room.Board.Add(new Card(token));
             room.Board.Add(new Card(token));
         }
@@ -286,7 +314,7 @@ public sealed class GameService : IGameService
             (room.Board[i], room.Board[j]) = (room.Board[j], room.Board[i]);
         }
         for (var i = 0; i < room.Board.Count; i++) room.Board[i].Position = i;
-        room.Manifest = new AssetManifest(room.RoomId, room.PublicAssets.ToArray());
+        room.Manifest = new AssetManifest(room.RoomId, room.ThemeId, pairCount, room.PublicAssets.ToArray());
         events.Add(new("AssetsAvailable", new AssetsAvailable(room.RoomId, room.Manifest)));
     }
 
@@ -303,7 +331,9 @@ public sealed class GameService : IGameService
 
     private static void ChangeTurnLocked(Room room, string playerId, List<GameEvent> events)
     {
-        room.CurrentTurn = room.Mode == GameMode.AI ? room.AiPlayerId : room.Players.FirstOrDefault(x => x != playerId);
+        room.CurrentTurn = room.Mode == GameMode.AI
+            ? (playerId == room.AiPlayerId ? room.Players[0] : room.AiPlayerId)
+            : room.Players.FirstOrDefault(x => x != playerId);
         events.Add(new("TurnChanged", new TurnChanged(room.RoomId, room.CurrentTurn)));
     }
 
@@ -329,8 +359,8 @@ public sealed class GameService : IGameService
         }
     }
 
-    private static JoinRoomResponse ToJoinResponse(Room room, string playerId) => new(room.RoomId, playerId, room.AccessTokens[playerId], room.Mode, room.Difficulty, room.Status, ToCards(room), room.CurrentTurn);
-    private static GameState ToState(Room room) => new(room.RoomId, room.Mode, room.Difficulty, room.Status, room.Players.ToArray(), ToCards(room), room.CurrentTurn, new Dictionary<string, int>(room.Scores), new Dictionary<string, int>(room.Streaks), room.StartedAt, room.Duration);
+    private static JoinRoomResponse ToJoinResponse(Room room, string playerId) => new(room.RoomId, playerId, room.AccessTokens[playerId], room.Mode, room.Difficulty, room.Status, room.ThemeId, PairCounts[room.Difficulty], ToCards(room), room.CurrentTurn);
+    private static GameState ToState(Room room) => new(room.RoomId, room.Mode, room.Difficulty, room.Status, room.ThemeId, room.Players.ToArray(), ToCards(room), room.CurrentTurn, new Dictionary<string, int>(room.Scores), new Dictionary<string, int>(room.Streaks), room.StartedAt, room.Duration);
     private static IReadOnlyList<CardView> ToCards(Room room) => room.Board.Select(x => new CardView(x.Position, x.IsRevealed, x.IsMatched, x.IsRevealed || x.IsMatched ? x.AssetReference : null)).ToArray();
 
     private static string CreateAccessToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
@@ -349,11 +379,12 @@ public sealed class GameService : IGameService
         return null;
     }
 
-    private sealed class Room(string roomId, GameMode mode, GameDifficulty difficulty)
+    private sealed class Room(string roomId, GameMode mode, GameDifficulty difficulty, string themeId)
     {
         public string RoomId { get; } = roomId;
         public GameMode Mode { get; } = mode;
         public GameDifficulty Difficulty { get; } = difficulty;
+        public string ThemeId { get; } = themeId;
         public List<Card> Board { get; } = [];
         public Dictionary<string, ThemeAsset> Assets { get; } = new(StringComparer.Ordinal);
         public List<AssetManifestEntry> PublicAssets { get; } = [];
