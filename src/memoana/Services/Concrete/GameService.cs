@@ -1,5 +1,7 @@
 using memoana.Contracts;
 using memoana.Services.Abstract;
+using memoana.Persistence;
+using System.Text.Json;
 using System.Security.Cryptography;
 
 namespace memoana.Services.Concrete;
@@ -8,6 +10,7 @@ namespace memoana.Services.Concrete;
 public sealed class GameService : IGameService
 {
     private readonly IThemeProvider _themeProvider;
+    private readonly IGameStateStore? _stateStore;
     private const int BaseScore = 100;
     private const double ScoreMultiplier = 1.5;
     private static readonly IReadOnlyDictionary<GameDifficulty, int> PairCounts = new Dictionary<GameDifficulty, int>
@@ -32,7 +35,12 @@ public sealed class GameService : IGameService
     private readonly object _roomsGate = new();
     private readonly Dictionary<string, Room> _rooms = new(StringComparer.OrdinalIgnoreCase);
 
-    public GameService(IThemeProvider themeProvider) => _themeProvider = themeProvider;
+    public GameService(IThemeProvider themeProvider, IGameStateStore? stateStore = null)
+    {
+        _themeProvider = themeProvider;
+        _stateStore = stateStore;
+        RestoreRooms();
+    }
 
     public IReadOnlyList<ThemeSummary> ListThemes() => _themeProvider.ListThemes();
 
@@ -58,13 +66,14 @@ public sealed class GameService : IGameService
         {
             _rooms.Add(room.RoomId, room);
         }
+        Persist(room);
 
         return GameOperationResult.Success(new CreateRoomResponse(room.RoomId, room.Mode, room.Difficulty, room.Status, room.ThemeId, pairCount, pairCount * 2));
     }
 
-    public GameOperationResult JoinRoom(string roomId, string playerId)
+    public GameOperationResult JoinRoom(string roomId, string connectionId, string? requestedPlayerId = null, string? accessToken = null)
     {
-        if (string.IsNullOrWhiteSpace(playerId))
+        if (string.IsNullOrWhiteSpace(connectionId))
             return GameOperationResult.Failure("invalid_player", "A connection identity is required.");
 
         var room = FindRoom(roomId);
@@ -74,15 +83,30 @@ public sealed class GameService : IGameService
         {
             if (room.Status == GameStatus.Finished)
                 return GameOperationResult.Failure("game_finished", "The game has already finished.");
+            if (!string.IsNullOrWhiteSpace(accessToken))
+            {
+                var existingPlayer = FindPlayerByToken(room, accessToken);
+                if (existingPlayer is null || (!string.IsNullOrWhiteSpace(requestedPlayerId) && existingPlayer != requestedPlayerId))
+                    return GameOperationResult.Failure("invalid_participation_token", "The participation token is invalid for this room.");
+                if (room.Connections.Values.Any(x => x == existingPlayer && x != connectionId))
+                    return GameOperationResult.Failure("player_already_connected", "The participant already has an active connection.");
+                room.Connections[connectionId] = existingPlayer;
+                return GameOperationResult.Success(ToJoinResponse(room, existingPlayer, accessToken));
+            }
+            if (room.Connections.ContainsKey(connectionId))
+                return GameOperationResult.Failure("already_connected", "This connection already belongs to a room.");
+            var playerId = string.IsNullOrWhiteSpace(requestedPlayerId) ? $"player:{Guid.NewGuid():N}" : requestedPlayerId;
             if (room.Players.Contains(playerId))
-                return GameOperationResult.Failure("player_already_joined", "This connection already belongs to the room.");
+                return GameOperationResult.Failure("player_already_joined", "This participant already belongs to the room.");
             if (room.Mode == GameMode.AI && room.Players.Count >= 1)
                 return GameOperationResult.Failure("room_full", "An AI room accepts one human player.");
             if (room.Mode == GameMode.PVP && room.Players.Count >= 2)
                 return GameOperationResult.Failure("room_full", "A PVP room accepts at most two players.");
 
             room.Players.Add(playerId);
+            room.Connections[connectionId] = playerId;
             room.AccessTokens[playerId] = CreateAccessToken();
+            room.AccessTokenHashes[playerId] = HashToken(room.AccessTokens[playerId]);
             room.Scores[playerId] = 0;
             room.Streaks[playerId] = 0;
             if (room.Mode == GameMode.AI)
@@ -100,6 +124,7 @@ public sealed class GameService : IGameService
                 {
                     room.Status = GameStatus.Finished;
                     room.Players.Remove(playerId);
+                    room.Connections.Remove(connectionId);
                     room.AccessTokens.Remove(playerId);
                     room.Scores.Remove(playerId);
                     room.Streaks.Remove(playerId);
@@ -107,6 +132,7 @@ public sealed class GameService : IGameService
                 }
             }
 
+            Persist(room);
             return GameOperationResult.Success(ToJoinResponse(room, playerId), events);
         }
     }
@@ -117,6 +143,7 @@ public sealed class GameService : IGameService
         if (room is null) return GameOperationResult.Failure("room_not_found", "The room does not exist.");
         lock (room.Gate)
         {
+            playerId = ResolvePlayerId(room, playerId) ?? playerId;
             if (!room.Players.Contains(playerId)) return GameOperationResult.Failure("player_not_in_room", "The player is not in this room.");
             if (room.Status is GameStatus.Playing) return GameOperationResult.Success(ToState(room));
             if (room.Status is GameStatus.Finished) return GameOperationResult.Failure("game_finished", "The game has already finished.");
@@ -129,6 +156,7 @@ public sealed class GameService : IGameService
             var requiredPlayers = room.Mode == GameMode.PVP ? 2 : 1;
             if (room.ReadyPlayers.Count >= requiredPlayers)
                 StartRoomLocked(room, events);
+            Persist(room);
             return GameOperationResult.Success(ToState(room), events);
         }
     }
@@ -157,9 +185,12 @@ public sealed class GameService : IGameService
         if (room is null) return GameOperationResult.Failure("room_not_found", "The room does not exist.");
         lock (room.Gate)
         {
+            playerId = ResolvePlayerId(room, playerId) ?? playerId;
             if (!room.Players.Remove(playerId)) return GameOperationResult.Failure("player_not_in_room", "The player is not in this room.");
+            foreach (var connection in room.Connections.Where(x => x.Value == playerId).Select(x => x.Key).ToArray()) room.Connections.Remove(connection);
             room.ReadyPlayers.Remove(playerId);
             room.AccessTokens.Remove(playerId);
+            room.AccessTokenHashes.Remove(playerId);
             room.Scores.Remove(playerId);
             room.Streaks.Remove(playerId);
             var events = new List<GameEvent> { new("PlayerLeft", new PlayerLeft(room.RoomId, playerId)) };
@@ -167,7 +198,20 @@ public sealed class GameService : IGameService
                 FinishRoomLocked(room, events, "player_left");
             else if (room.Players.Count == 0)
                 room.Status = GameStatus.Finished;
+            Persist(room);
             return GameOperationResult.Success(ToState(room), events);
+        }
+    }
+
+    public GameOperationResult Disconnect(string roomId, string connectionId)
+    {
+        var room = FindRoom(roomId);
+        if (room is null) return GameOperationResult.Failure("room_not_found", "The room does not exist.");
+        lock (room.Gate)
+        {
+            if (!room.Connections.Remove(connectionId)) return GameOperationResult.Failure("connection_not_found", "The connection is not attached to this room.");
+            Persist(room);
+            return GameOperationResult.Success(ToState(room));
         }
     }
 
@@ -177,6 +221,7 @@ public sealed class GameService : IGameService
         if (room is null) return GameOperationResult.Failure("room_not_found", "The room does not exist.");
         lock (room.Gate)
         {
+            playerId = ResolvePlayerId(room, playerId) ?? playerId;
             if (room.Status != GameStatus.Playing) return GameOperationResult.Failure("game_not_playing", "The game is not currently playing.");
             if (room.Mode == GameMode.Time && DateTimeOffset.UtcNow - room.StartedAt >= room.Duration)
             {
@@ -185,7 +230,9 @@ public sealed class GameService : IGameService
                 return GameOperationResult.Success(ToState(room), expired);
             }
             if (room.CurrentTurn != playerId) return GameOperationResult.Failure("wrong_turn", "It is not this player's turn.");
-            return FlipCardLocked(room, playerId, position);
+            var result = FlipCardLocked(room, playerId, position);
+            if (result.Succeeded) Persist(room);
+            return result;
         }
     }
 
@@ -207,7 +254,7 @@ public sealed class GameService : IGameService
     {
         var room = FindRoom(roomId);
         if (room is null) return null;
-        lock (room.Gate) return room.Players.Contains(playerId) ? ToState(room) : null;
+        lock (room.Gate) return ResolvePlayerId(room, playerId) is not null ? ToState(room) : null;
     }
 
     public IReadOnlyList<RoomEvents> ExpireDueRooms()
@@ -226,6 +273,7 @@ public sealed class GameService : IGameService
 
                     var events = new List<GameEvent>();
                     FinishRoomLocked(room, events, "time_expired");
+                    Persist(room);
                     expired.Add(new RoomEvents(room.RoomId, events));
                 }
             }
@@ -324,6 +372,7 @@ public sealed class GameService : IGameService
         room.CurrentTurn = room.Players[0];
         room.StartedAt = DateTimeOffset.UtcNow;
         room.Duration = room.Mode == GameMode.Time ? TimeLimits[room.Difficulty] : null;
+        room.ExpiresAt = room.Duration is null ? null : room.StartedAt + room.Duration;
         room.Status = GameStatus.Playing;
         events.Add(new("GameStarted", new GameStarted(room.RoomId, room.StartedAt.Value, room.Duration)));
         events.Add(new("TurnChanged", new TurnChanged(room.RoomId, room.CurrentTurn)));
@@ -359,25 +408,90 @@ public sealed class GameService : IGameService
         }
     }
 
-    private static JoinRoomResponse ToJoinResponse(Room room, string playerId) => new(room.RoomId, playerId, room.AccessTokens[playerId], room.Mode, room.Difficulty, room.Status, room.ThemeId, PairCounts[room.Difficulty], ToCards(room), room.CurrentTurn);
+    private static JoinRoomResponse ToJoinResponse(Room room, string playerId, string? suppliedToken = null) => new(room.RoomId, playerId, suppliedToken ?? room.AccessTokens[playerId], room.Mode, room.Difficulty, room.Status, room.ThemeId, PairCounts[room.Difficulty], ToCards(room), room.CurrentTurn);
     private static GameState ToState(Room room) => new(room.RoomId, room.Mode, room.Difficulty, room.Status, room.ThemeId, room.Players.ToArray(), ToCards(room), room.CurrentTurn, new Dictionary<string, int>(room.Scores), new Dictionary<string, int>(room.Streaks), room.StartedAt, room.Duration);
     private static IReadOnlyList<CardView> ToCards(Room room) => room.Board.Select(x => new CardView(x.Position, x.IsRevealed, x.IsMatched, x.IsRevealed || x.IsMatched ? x.AssetReference : null)).ToArray();
 
     private static string CreateAccessToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+    private static string HashToken(string token) => Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
 
     private static string? FindPlayerByToken(Room room, string accessToken)
     {
         if (string.IsNullOrWhiteSpace(accessToken)) return null;
-        foreach (var entry in room.AccessTokens)
+        foreach (var entry in room.AccessTokenHashes)
         {
             try
             {
-                if (CryptographicOperations.FixedTimeEquals(Convert.FromHexString(entry.Value), Convert.FromHexString(accessToken))) return entry.Key;
+                if (CryptographicOperations.FixedTimeEquals(Convert.FromHexString(entry.Value), Convert.FromHexString(HashToken(accessToken)))) return entry.Key;
             }
             catch (FormatException) { return null; }
         }
         return null;
     }
+
+    private static string? ResolvePlayerId(Room room, string id) => room.Players.Contains(id) ? id : room.Connections.GetValueOrDefault(id);
+
+    private void Persist(Room room)
+    {
+        if (_stateStore is null) return;
+        room.Version++;
+        var snapshot = new RoomSnapshot(
+            room.Players.Select(player => new PlayerSnapshot(player, room.AccessTokenHashes.GetValueOrDefault(player) ?? string.Empty, room.ReadyPlayers.Contains(player))).ToArray(),
+            room.Board.Select(card => new CardSnapshot(card.Position, card.PairKey, card.AssetReference, card.IsRevealed, card.IsMatched)).ToArray(),
+            room.Assets.Select(asset => new AssetSnapshot(asset.Key, asset.Value.SourceId, asset.Value.ContentType, asset.Value.Content)).ToArray(),
+            new Dictionary<string, int>(room.Scores), new Dictionary<string, int>(room.Streaks), new List<AssetManifestEntry>(room.PublicAssets),
+            room.CurrentTurn, room.AiPlayerId, room.StartedAt, room.Duration, room.FirstPosition, room.PendingPosition);
+        _stateStore.Save(new PersistedRoom
+        {
+            RoomId = room.RoomId, Mode = (int)room.Mode, Difficulty = (int)room.Difficulty, Status = (int)room.Status,
+            ThemeId = room.ThemeId, CreatedAt = room.CreatedAt, ExpiresAt = room.ExpiresAt, UpdatedAt = DateTimeOffset.UtcNow,
+            Version = room.Version, SnapshotJson = JsonSerializer.Serialize(snapshot)
+        });
+    }
+
+    private void RestoreRooms()
+    {
+        if (_stateStore is null) return;
+        foreach (var persisted in _stateStore.LoadRooms())
+        {
+            try
+            {
+                var snapshot = JsonSerializer.Deserialize<RoomSnapshot>(persisted.SnapshotJson);
+                if (snapshot is null) continue;
+                var room = new Room(persisted.RoomId, (GameMode)persisted.Mode, (GameDifficulty)persisted.Difficulty, persisted.ThemeId)
+                {
+                    Status = (GameStatus)persisted.Status, CreatedAt = persisted.CreatedAt, ExpiresAt = persisted.ExpiresAt,
+                    Version = persisted.Version, CurrentTurn = snapshot.CurrentTurn, AiPlayerId = snapshot.AiPlayerId,
+                    StartedAt = snapshot.StartedAt, Duration = snapshot.Duration, FirstPosition = snapshot.FirstPosition, PendingPosition = snapshot.PendingPosition
+                };
+                foreach (var player in snapshot.Players)
+                {
+                    room.Players.Add(player.PlayerId);
+                    room.AccessTokenHashes[player.PlayerId] = player.TokenHash;
+                    if (player.Ready) room.ReadyPlayers.Add(player.PlayerId);
+                }
+                foreach (var score in snapshot.Scores) room.Scores[score.Key] = score.Value;
+                foreach (var streak in snapshot.Streaks) room.Streaks[streak.Key] = streak.Value;
+                foreach (var asset in snapshot.Assets) room.Assets[asset.AssetToken] = new ThemeAsset(asset.SourceId, asset.ContentType, asset.Content);
+                room.PublicAssets.AddRange(snapshot.Manifest);
+                foreach (var card in snapshot.Cards) room.Board.Add(new Card(card.AssetReference, card.PairKey) { Position = card.Position, IsRevealed = card.IsRevealed, IsMatched = card.IsMatched });
+                if (room.Status == GameStatus.Playing && room.ExpiresAt is not null && room.ExpiresAt <= DateTimeOffset.UtcNow)
+                {
+                    room.Status = GameStatus.Finished;
+                    room.CurrentTurn = null;
+                }
+                room.Manifest = room.PublicAssets.Count == 0 ? null : new AssetManifest(room.RoomId, room.ThemeId, PairCounts[room.Difficulty], room.PublicAssets.ToArray());
+                lock (_roomsGate) _rooms[room.RoomId] = room;
+                if (room.Status == GameStatus.Finished && persisted.Status != (int)GameStatus.Finished) Persist(room);
+            }
+            catch (JsonException) { }
+        }
+    }
+
+    private sealed record RoomSnapshot(IReadOnlyList<PlayerSnapshot> Players, IReadOnlyList<CardSnapshot> Cards, IReadOnlyList<AssetSnapshot> Assets, IReadOnlyDictionary<string, int> Scores, IReadOnlyDictionary<string, int> Streaks, IReadOnlyList<AssetManifestEntry> Manifest, string? CurrentTurn, string? AiPlayerId, DateTimeOffset? StartedAt, TimeSpan? Duration, int? FirstPosition, int? PendingPosition);
+    private sealed record PlayerSnapshot(string PlayerId, string TokenHash, bool Ready);
+    private sealed record CardSnapshot(int Position, string PairKey, string AssetReference, bool IsRevealed, bool IsMatched);
+    private sealed record AssetSnapshot(string AssetToken, string SourceId, string ContentType, byte[] Content);
 
     private sealed class Room(string roomId, GameMode mode, GameDifficulty difficulty, string themeId)
     {
@@ -391,6 +505,8 @@ public sealed class GameService : IGameService
         public AssetManifest? Manifest { get; set; }
         public List<string> Players { get; } = [];
         public Dictionary<string, string> AccessTokens { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> AccessTokenHashes { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> Connections { get; } = new(StringComparer.Ordinal);
         public HashSet<string> ReadyPlayers { get; } = [];
         public Dictionary<string, int> Scores { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, int> Streaks { get; } = new(StringComparer.Ordinal);
@@ -400,13 +516,16 @@ public sealed class GameService : IGameService
         public string? AiPlayerId { get; set; }
         public DateTimeOffset? StartedAt { get; set; }
         public TimeSpan? Duration { get; set; }
+        public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+        public DateTimeOffset? ExpiresAt { get; set; }
+        public long Version { get; set; }
         public int? FirstPosition { get; set; }
         public int? PendingPosition { get; set; }
     }
 
-    private sealed class Card(string assetReference)
+    private sealed class Card(string assetReference, string? pairKey = null)
     {
-        public string PairKey { get; } = assetReference;
+        public string PairKey { get; } = pairKey ?? assetReference;
         public int Position { get; set; }
         public bool IsRevealed { get; set; }
         public bool IsMatched { get; set; }

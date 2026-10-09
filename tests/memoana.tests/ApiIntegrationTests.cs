@@ -72,17 +72,52 @@ public sealed class ApiIntegrationTests : IClassFixture<ApiFactory>
 
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"api/game/rooms/{room.RoomId}")).StatusCode);
     }
+
+    [Fact]
+    public async Task SignalRReconnectRestoresTheSameParticipant()
+    {
+        using var client = _factory.CreateClient();
+        var create = await client.PostAsJsonAsync("api/game/rooms", new { Mode = "Time", Difficulty = "Easy" });
+        var room = (await create.Content.ReadFromJsonAsync<CreateRoomResponse>(Json))!;
+        JoinRoomResponse joined;
+        await using (var first = CreateConnection())
+        {
+            await first.StartAsync();
+            var result = await first.InvokeAsync<GameOperationResult>("JoinRoom", room.RoomId);
+            joined = ((JsonElement)result.Value!).Deserialize<JoinRoomResponse>(Json)!;
+        }
+
+        await using var second = CreateConnection();
+        await second.StartAsync();
+        var restored = await second.InvokeAsync<GameOperationResult>("ReconnectRoom", room.RoomId, joined.PlayerId, joined.AccessToken);
+
+        Assert.True(restored.Succeeded, $"{restored.ErrorCode}: {restored.ErrorMessage}");
+        var restoredJoin = ((JsonElement)restored.Value!).Deserialize<JoinRoomResponse>(Json)!;
+        Assert.Equal(joined.PlayerId, restoredJoin.PlayerId);
+        Assert.Equal(joined.RoomId, restoredJoin.RoomId);
+    }
+
+    private HubConnection CreateConnection() => new HubConnectionBuilder()
+        .WithUrl(new Uri(_factory.Server.BaseAddress!, "gameHub"), options =>
+        {
+            options.Transports = HttpTransportType.LongPolling;
+            options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+        })
+        .Build();
 }
 
 public sealed class ApiFactory : WebApplicationFactory<Program>
 {
+    private readonly string _databasePath = Path.Combine(Path.GetTempPath(), "memoana-tests", $"{Guid.NewGuid():N}.db");
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
         builder.UseSetting(WebHostDefaults.ContentRootKey, repositoryRoot);
         builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["Themes:RootPath"] = Path.Combine(repositoryRoot, "modules", "themes", "src", "themes", "wwwroot")
+            ["Themes:RootPath"] = Path.Combine(repositoryRoot, "modules", "themes", "src", "themes", "wwwroot"),
+            ["Persistence:DatabasePath"] = _databasePath
         }));
         builder.ConfigureServices(services =>
         {
@@ -90,6 +125,16 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<IThemeProvider, IntegrationThemeProvider>();
         });
         builder.UseTestServer();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (disposing)
+        {
+            var directory = Path.GetDirectoryName(_databasePath);
+            if (directory is not null && Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
     }
 }
 

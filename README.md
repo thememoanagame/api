@@ -30,7 +30,19 @@ O cliente invoca `JoinRoom`, `GetState`, `AssetsReady`, `FlipCard(roomId, positi
 
 Time inicia quando o único participante confirma os assets e termina por todos os pares ou pelo temporizador. PVP prepara após dois participantes ingressarem e só inicia quando ambos confirmam os assets. AI prepara com um humano; os movimentos da IA são processados pelo mesmo `FlipCard` autoritativo após `GameStarted`.
 
-O estado das salas é mantido em memória do processo. Desconectar remove o participante e encerra uma partida ativa; reiniciar ou escalar a API perde as salas e tokens existentes, portanto o MVP não oferece recuperação distribuída.
+O estado ativo é mantido em memória e persistido em SQLite. Desconectar remove apenas a associação temporária do transporte; sair voluntariamente remove o participante. Reiniciar recupera salas persistidas, mas escalar a API ainda exige coordenação externa.
+
+## Persistência e recuperação
+
+O estado das salas é persistido em SQLite por `MemoAnaDbContext` e `SqliteGameStateStore`. O caminho padrão é `data/memoana.db` e pode ser alterado por `Persistence:DatabasePath` ou `Persistence__DatabasePath`. A aplicação cria o diretório e aplica as migrações pendentes durante a inicialização. A migração inicial está em `src/memoana/Persistence/Migrations`.
+
+O snapshot persistido preserva a ordem do tabuleiro, correspondências internas, cartas reveladas/encontradas, assets selecionados, participantes, hashes dos tokens, prontidão, pontuação, turno, início e prazo. Os bytes dos assets selecionados são mantidos no snapshot para garantir que uma restauração não escolha outro conjunto quando o catálogo mudar.
+
+`JoinRoom(roomId)` mantém o fluxo inicial. Para reconectar uma participação existente, o cliente invoca `ReconnectRoom(roomId, playerId, accessToken)`. O `PlayerId` é estável na sala; o `ConnectionId` só representa o transporte atual. O servidor rejeita uma segunda conexão simultânea para o mesmo participante. Desconexão de transporte remove apenas a associação temporária; `LeaveRoom` remove a participação e revoga o token.
+
+A API continua sendo uma instância única para coordenação das alterações em memória e SignalR. SQLite permite recuperar o estado após reinício, mas não substitui um armazenamento compartilhado, backplane SignalR ou lock distribuído para múltiplas instâncias. Em Docker, monte um volume no diretório configurado para `Persistence__DatabasePath`.
+
+Para aplicar migrações manualmente, use `dotnet ef database update --project src/memoana/memoana.csproj --startup-project src/memoana/memoana.csproj`. Não use `EnsureDeleted` em ambientes persistentes.
 
 ## ❓ What is My Project?
 

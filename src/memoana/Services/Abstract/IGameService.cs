@@ -7,7 +7,8 @@ public interface IGameService
     IReadOnlyList<ThemeSummary> ListThemes();
     IReadOnlyList<DifficultyOption> ListDifficulties();
     GameOperationResult CreateRoom(CreateRoomRequest request);
-    GameOperationResult JoinRoom(string roomId, string playerId);
+    GameOperationResult JoinRoom(string roomId, string connectionId, string? playerId = null, string? accessToken = null);
+    GameOperationResult Disconnect(string roomId, string connectionId);
     GameOperationResult AssetsReady(string roomId, string playerId);
     GameOperationResult LeaveRoom(string roomId, string playerId);
     GameOperationResult FlipCard(string roomId, string playerId, int position);

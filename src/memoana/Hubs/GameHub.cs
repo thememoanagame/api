@@ -1,28 +1,44 @@
 using memoana.Contracts;
 using memoana.Services.Abstract;
 using Microsoft.AspNetCore.SignalR;
+using System.Text.Json;
 
 namespace memoana.Hubs;
 
-public sealed class GameHub(IGameService gameService) : Hub
+public sealed class GameHub(IGameService gameService, ILogger<GameHub> logger) : Hub
 {
-    public async Task<GameOperationResult> JoinRoom(string roomId)
-    {
-        if (Context.Items.TryGetValue("roomId", out var existingRoom) &&
-            !string.Equals(existingRoom?.ToString(), roomId, StringComparison.OrdinalIgnoreCase))
-            return await Reject(GameOperationResult.Failure("already_in_room", "This connection already belongs to another room."));
+    public Task<GameOperationResult> JoinRoom(string roomId) => JoinRoomCore(roomId, null, null);
 
-        var result = gameService.JoinRoom(roomId, Context.ConnectionId);
-        if (!result.Succeeded) return await Reject(result);
-        Context.Items["roomId"] = roomId;
-        await Groups.AddToGroupAsync(Context.ConnectionId, roomId);
-        await Publish(roomId, result.Events);
-        return result;
+    public Task<GameOperationResult> ReconnectRoom(string roomId, string playerId, string accessToken) => JoinRoomCore(roomId, playerId, accessToken);
+
+    private async Task<GameOperationResult> JoinRoomCore(string roomId, string? playerId, string? accessToken)
+    {
+        try
+        {
+            if (Context.Items.TryGetValue("roomId", out var existingRoom) &&
+                !string.Equals(existingRoom?.ToString(), roomId, StringComparison.OrdinalIgnoreCase))
+                return await Reject(GameOperationResult.Failure("already_in_room", "This connection already belongs to another room."));
+
+            var result = gameService.JoinRoom(roomId, Context.ConnectionId, playerId, accessToken);
+            if (!result.Succeeded) return await Reject(result);
+            Context.Items["roomId"] = roomId;
+            if (result.Value is JoinRoomResponse joined) Context.Items["playerId"] = joined.PlayerId;
+            else if (result.Value is JsonElement json && json.Deserialize<JoinRoomResponse>() is { } restored) Context.Items["playerId"] = restored.PlayerId;
+            await Groups.AddToGroupAsync(Context.ConnectionId, roomId);
+            await Publish(roomId, result.Events);
+            return result;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Could not complete join for room {RoomId}", roomId);
+            return await Reject(GameOperationResult.Failure("join_failed", "The room could not be joined."));
+        }
     }
 
     public async Task<GameOperationResult> LeaveRoom(string roomId)
     {
-        var result = gameService.LeaveRoom(roomId, Context.ConnectionId);
+        var playerId = Context.Items.TryGetValue("playerId", out var value) ? value?.ToString() : Context.ConnectionId;
+        var result = gameService.LeaveRoom(roomId, playerId!);
         if (result.Succeeded)
         {
             await Publish(roomId, result.Events);
@@ -55,7 +71,7 @@ public sealed class GameHub(IGameService gameService) : Hub
         var rooms = new[] { Context.Items.TryGetValue("roomId", out var value) ? value?.ToString() : null };
         foreach (var roomId in rooms.Where(x => !string.IsNullOrWhiteSpace(x)))
         {
-            var result = gameService.LeaveRoom(roomId!, Context.ConnectionId);
+            var result = gameService.Disconnect(roomId!, Context.ConnectionId);
             if (result.Succeeded)
             {
                 await Publish(roomId!, result.Events);
