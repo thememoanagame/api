@@ -25,16 +25,16 @@ public sealed class GameController(IGameService gameService, IGameAssetService a
     [HttpGet("rooms/{roomId}/assets")]
     public ActionResult<AssetManifest> GetAssets(string roomId)
     {
-        var playerId = Request.Headers["X-Player-Id"].ToString();
-        var manifest = assetService.GetManifest(roomId, playerId);
+        var accessToken = Request.Headers["X-Player-Token"].ToString();
+        var manifest = assetService.GetManifest(roomId, accessToken);
         return manifest is null ? NotFound(new GameError("assets_not_available", "Assets are not available to this player.")) : Ok(manifest);
     }
 
     [HttpGet("rooms/{roomId}/assets/{token}")]
     public IActionResult GetAsset(string roomId, string token)
     {
-        var playerId = Request.Headers["X-Player-Id"].ToString();
-        var asset = assetService.GetAsset(roomId, playerId, token);
+        var accessToken = Request.Headers["X-Player-Token"].ToString();
+        var asset = assetService.GetAsset(roomId, accessToken, token);
         return asset is null ? NotFound(new GameError("asset_not_found", "The asset is not available to this player.")) : File(asset.Value.Content, asset.Value.ContentType);
     }
 }

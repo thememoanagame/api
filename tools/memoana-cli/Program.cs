@@ -31,7 +31,7 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
         first.Register(ledger); second?.Register(ledger);
         await first.StartAsync(); if (second is not null) await second.StartAsync();
         var joined = await first.JoinAsync(room.RoomId); var other = second is null ? null : await second.JoinAsync(room.RoomId);
-        first.PlayerId = joined.PlayerId; if (second is not null) second.PlayerId = other!.PlayerId;
+        first.PlayerId = joined.PlayerId; first.AccessToken = joined.AccessToken; if (second is not null) { second.PlayerId = other!.PlayerId; second.AccessToken = other.AccessToken; }
         await PrepareAssetsAsync(room.RoomId, first);
         if (second is not null) await PrepareAssetsAsync(room.RoomId, second);
         var state = await GetStateAsync(room.RoomId); ValidateBoard(state, difficulty);
@@ -57,7 +57,7 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
     {
         var room = await CreateRoomAsync("Time", difficulty);
         await using var client = new GameClient(new Uri(options.Url + "/gameHub"), "Time"); var ledger = new EventLedger(); client.Register(ledger); await client.StartAsync();
-        var joined = await client.JoinAsync(room.RoomId); client.PlayerId = joined.PlayerId;
+        var joined = await client.JoinAsync(room.RoomId); client.PlayerId = joined.PlayerId; client.AccessToken = joined.AccessToken;
         await PrepareAssetsAsync(room.RoomId, client);
         var state = await GetStateAsync(room.RoomId); ValidateBoard(state, difficulty);
         if (state.StartedAt is null || state.Duration is null) throw new InvalidOperationException("Time game did not expose timing metadata.");
@@ -80,8 +80,8 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
         var room = await CreateRoomAsync("PVP", "Easy");
         await using var one = new GameClient(new Uri(options.Url + "/gameHub"), "invalid-1"); await using var two = new GameClient(new Uri(options.Url + "/gameHub"), "invalid-2"); await using var three = new GameClient(new Uri(options.Url + "/gameHub"), "invalid-3");
         one.Register(new EventLedger()); two.Register(new EventLedger()); three.Register(new EventLedger()); await one.StartAsync(); await two.StartAsync(); await three.StartAsync();
-        ExpectFailure(await one.TryJoinAsync("missing"), "missing room"); var first = await one.JoinAsync(room.RoomId); one.PlayerId = first.PlayerId; ExpectFailure(await one.TryFlipAsync(room.RoomId, -1), "flip while waiting");
-        var second = await two.JoinAsync(room.RoomId); two.PlayerId = second.PlayerId;
+        ExpectFailure(await one.TryJoinAsync("missing"), "missing room"); var first = await one.JoinAsync(room.RoomId); one.PlayerId = first.PlayerId; one.AccessToken = first.AccessToken; ExpectFailure(await one.TryFlipAsync(room.RoomId, -1), "flip while waiting");
+        var second = await two.JoinAsync(room.RoomId); two.PlayerId = second.PlayerId; two.AccessToken = second.AccessToken;
         await PrepareAssetsAsync(room.RoomId, one); await PrepareAssetsAsync(room.RoomId, two);
         ExpectFailure(await two.TryFlipAsync(room.RoomId, 0), "wrong turn"); ExpectFailure(await one.TryFlipAsync(room.RoomId, 999), "position above board"); ExpectFailure(await three.TryJoinAsync(room.RoomId), "room full");
         await one.FlipAsync(room.RoomId, 0); ExpectFailure(await one.TryFlipAsync(room.RoomId, 0), "already revealed"); Console.WriteLine("Invalid ops: PASS");
@@ -107,14 +107,14 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
     private async Task PrepareAssetsAsync(string roomId, GameClient client)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, $"api/game/rooms/{roomId}/assets");
-        request.Headers.Add("X-Player-Id", client.PlayerId);
+        request.Headers.Add("X-Player-Token", client.AccessToken);
         using var response = await http.SendAsync(request); response.EnsureSuccessStatusCode();
         var manifest = (await response.Content.ReadFromJsonAsync<AssetManifest>(Json))!;
         if (manifest.Assets.Length == 0 || manifest.Assets.Any(x => string.IsNullOrWhiteSpace(x.AssetToken))) throw new InvalidOperationException("Asset manifest is empty or contains an invalid token.");
         foreach (var asset in manifest.Assets)
         {
             using var assetRequest = new HttpRequestMessage(HttpMethod.Get, $"api/game/rooms/{roomId}/assets/{asset.AssetToken}");
-            assetRequest.Headers.Add("X-Player-Id", client.PlayerId);
+            assetRequest.Headers.Add("X-Player-Token", client.AccessToken);
             using var assetResponse = await http.SendAsync(assetRequest); assetResponse.EnsureSuccessStatusCode();
             var bytes = await assetResponse.Content.ReadAsByteArrayAsync();
             var contentType = assetResponse.Content.Headers.ContentType?.MediaType;
@@ -129,7 +129,7 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
 
 sealed class GameClient(Uri hubUrl, string name) : IAsyncDisposable
 {
-    public HubConnection Connection { get; } = new HubConnectionBuilder().WithUrl(hubUrl).Build(); public string Name { get; } = name; public string? PlayerId { get; set; }
+    public HubConnection Connection { get; } = new HubConnectionBuilder().WithUrl(hubUrl).Build(); public string Name { get; } = name; public string? PlayerId { get; set; } public string? AccessToken { get; set; }
     public void Register(EventLedger ledger) { Connection.On<CardRevealed>("CardRevealed", ledger.CardRevealed); Connection.On<PairMatched>("PairMatched", ledger.PairMatched); Connection.On<PairMissed>("PairMissed", ledger.PairMissed); Connection.On<ScoreUpdated>("ScoreUpdated", ledger.ScoreUpdated); Connection.On<TurnChanged>("TurnChanged", ledger.TurnChanged); Connection.On<GameFinished>("GameFinished", ledger.GameFinished); }
     public Task StartAsync() => Connection.StartAsync();
     public async Task<JoinRoomResponse> JoinAsync(string roomId) => Ensure(await Connection.InvokeAsync<GameOperationResult>("JoinRoom", roomId)).Value.Deserialize<JoinRoomResponse>(CliJson.Options)!;
@@ -167,7 +167,7 @@ sealed class EventLedger
 sealed record CliOptions(string Url, string Mode, string Difficulty, string Scenario)
 { public static CliOptions Parse(string[] args) => new(Get(args, "url", "http://127.0.0.1:5090").TrimEnd('/'), Get(args, "mode", "PVP"), Get(args, "difficulty", "Easy"), Get(args, "scenario", "smoke")); private static string Get(string[] args, string name, string fallback) => args.FirstOrDefault(x => x.StartsWith($"--{name}=", StringComparison.OrdinalIgnoreCase))?[($"--{name}=".Length)..] ?? fallback; }
 enum GameMode { Time, PVP, AI } enum GameDifficulty { Easy, Medium, Hard } enum GameStatus { Waiting, Preparing, Playing, Finished }
-record CreateRoomResponse(string RoomId, string Mode, string Difficulty, GameStatus Status); record JoinRoomResponse(string RoomId, string PlayerId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, CardView[] Board, string? CurrentTurn, string[]? Players = null, Dictionary<string, int>? Scores = null, Dictionary<string, int>? ConsecutiveHits = null, DateTimeOffset? StartedAt = null, TimeSpan? Duration = null); record CardView(int Position, bool IsRevealed, bool IsMatched, string? AssetReference); record GameState(string RoomId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, string[] Players, CardView[] Board, string? CurrentTurn, Dictionary<string, int> Scores, Dictionary<string, int> ConsecutiveHits, DateTimeOffset? StartedAt, TimeSpan? Duration); record AssetManifest(string RoomId, AssetManifestEntry[] Assets); record AssetManifestEntry(string AssetToken, string ContentType, long Size); record GameOperationResult(bool Succeeded, string? ErrorCode, string? ErrorMessage, JsonElement Value);
+record CreateRoomResponse(string RoomId, string Mode, string Difficulty, GameStatus Status); record JoinRoomResponse(string RoomId, string PlayerId, string AccessToken, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, CardView[] Board, string? CurrentTurn, string[]? Players = null, Dictionary<string, int>? Scores = null, Dictionary<string, int>? ConsecutiveHits = null, DateTimeOffset? StartedAt = null, TimeSpan? Duration = null); record CardView(int Position, bool IsRevealed, bool IsMatched, string? AssetReference); record GameState(string RoomId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, string[] Players, CardView[] Board, string? CurrentTurn, Dictionary<string, int> Scores, Dictionary<string, int> ConsecutiveHits, DateTimeOffset? StartedAt, TimeSpan? Duration); record AssetManifest(string RoomId, AssetManifestEntry[] Assets); record AssetManifestEntry(string AssetToken, string ContentType, long Size); record GameOperationResult(bool Succeeded, string? ErrorCode, string? ErrorMessage, JsonElement Value);
 record CardRevealed(string RoomId, int Position, string AssetReference); record PairMatched(string RoomId, int FirstPosition, int SecondPosition, string PlayerId, int EarnedScore, int TotalScore, int Streak); record PairMissed(string RoomId, int FirstPosition, int SecondPosition); record ScoreUpdated(string RoomId, string PlayerId, int EarnedScore, int TotalScore, int Streak); record TurnChanged(string RoomId, string? PlayerId); record GameFinished(string RoomId, Dictionary<string, int> Scores, string Reason);
 static class CliJson { public static JsonSerializerOptions Options { get; } = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true }; }
 record LedgerEvent(PairMatched? Match, string? MissPlayer);

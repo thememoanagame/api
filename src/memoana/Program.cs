@@ -27,3 +27,5 @@ app.MapControllers();
 app.MapHub<memoana.Hubs.GameHub>("/gameHub");
 app.Run();
 
+public partial class Program;
+

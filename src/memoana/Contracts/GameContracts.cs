@@ -35,6 +35,7 @@ public sealed record CreateRoomResponse(
 public sealed record JoinRoomResponse(
     string RoomId,
     string PlayerId,
+    string AccessToken,
     GameMode Mode,
     GameDifficulty Difficulty,
     GameStatus Status,

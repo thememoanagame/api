@@ -1,5 +1,6 @@
 using memoana.Contracts;
 using memoana.Services.Abstract;
+using System.Security.Cryptography;
 
 namespace memoana.Services.Concrete;
 
@@ -67,6 +68,7 @@ public sealed class GameService : IGameService
                 return GameOperationResult.Failure("room_full", "A PVP room accepts at most two players.");
 
             room.Players.Add(playerId);
+            room.AccessTokens[playerId] = CreateAccessToken();
             room.Scores[playerId] = 0;
             room.Streaks[playerId] = 0;
             if (room.Mode == GameMode.AI)
@@ -78,7 +80,18 @@ public sealed class GameService : IGameService
 
             var events = new List<GameEvent> { new("PlayerJoined", new PlayerJoined(room.RoomId, playerId)) };
             if (room.Mode is GameMode.AI or GameMode.Time || room.Players.Count == 2)
-                PrepareRoomLocked(room, events);
+            {
+                try { PrepareRoomLocked(room, events); }
+                catch (Exception)
+                {
+                    room.Status = GameStatus.Finished;
+                    room.Players.Remove(playerId);
+                    room.AccessTokens.Remove(playerId);
+                    room.Scores.Remove(playerId);
+                    room.Streaks.Remove(playerId);
+                    return GameOperationResult.Failure("assets_preparation_failed", "The game assets could not be prepared.");
+                }
+            }
 
             return GameOperationResult.Success(ToJoinResponse(room, playerId), events);
         }
@@ -106,20 +119,20 @@ public sealed class GameService : IGameService
         }
     }
 
-    public AssetManifest? GetAssetManifest(string roomId, string playerId)
+    public AssetManifest? GetAssetManifest(string roomId, string accessToken)
     {
         var room = FindRoom(roomId);
         if (room is null) return null;
-        lock (room.Gate) return room.Players.Contains(playerId) ? room.Manifest : null;
+        lock (room.Gate) return FindPlayerByToken(room, accessToken) is not null ? room.Manifest : null;
     }
 
-    public (byte[] Content, string ContentType)? GetAsset(string roomId, string playerId, string token)
+    public (byte[] Content, string ContentType)? GetAsset(string roomId, string accessToken, string token)
     {
         var room = FindRoom(roomId);
         if (room is null) return null;
         lock (room.Gate)
         {
-            if (!room.Players.Contains(playerId) || room.Status == GameStatus.Finished || !room.Assets.TryGetValue(token, out var asset)) return null;
+            if (FindPlayerByToken(room, accessToken) is null || room.Status == GameStatus.Finished || !room.Assets.TryGetValue(token, out var asset)) return null;
             return (asset.Content, asset.ContentType);
         }
     }
@@ -132,6 +145,7 @@ public sealed class GameService : IGameService
         {
             if (!room.Players.Remove(playerId)) return GameOperationResult.Failure("player_not_in_room", "The player is not in this room.");
             room.ReadyPlayers.Remove(playerId);
+            room.AccessTokens.Remove(playerId);
             room.Scores.Remove(playerId);
             room.Streaks.Remove(playerId);
             var events = new List<GameEvent> { new("PlayerLeft", new PlayerLeft(room.RoomId, playerId)) };
@@ -237,18 +251,17 @@ public sealed class GameService : IGameService
     private void PlayAiTurnLocked(Room room, List<GameEvent> events)
     {
         var ai = room.AiPlayerId!;
-        var available = room.Board.Where(x => !x.IsMatched).ToList();
-        if (available.Count < 2) return;
-        var first = available[Random.Shared.Next(available.Count)];
-        var second = available.FirstOrDefault(x => x.PairKey == first.PairKey && x.Position != first.Position);
-        if (second is null || Random.Shared.NextDouble() > AiAccuracy[room.Difficulty])
-            second = available.Where(x => x.Position != first.Position).OrderBy(_ => Random.Shared.Next()).First();
-        var firstResult = FlipCardLocked(room, ai, first.Position);
-        events.AddRange(firstResult.Events);
-        var secondResult = FlipCardLocked(room, ai, second.Position);
-        events.AddRange(secondResult.Events);
-        if (room.Status == GameStatus.Playing && room.CurrentTurn == ai && room.PendingPosition is null && room.Board.Any(x => !x.IsMatched))
-            PlayAiTurnLocked(room, events);
+        while (room.Status == GameStatus.Playing && room.CurrentTurn == ai && room.PendingPosition is null)
+        {
+            var available = room.Board.Where(x => !x.IsMatched).ToList();
+            if (available.Count < 2) return;
+            var first = available[Random.Shared.Next(available.Count)];
+            var second = available.FirstOrDefault(x => x.PairKey == first.PairKey && x.Position != first.Position);
+            if (second is null || Random.Shared.NextDouble() > AiAccuracy[room.Difficulty])
+                second = available.Where(x => x.Position != first.Position).OrderBy(_ => Random.Shared.Next()).First();
+            events.AddRange(FlipCardLocked(room, ai, first.Position).Events);
+            events.AddRange(FlipCardLocked(room, ai, second.Position).Events);
+        }
     }
 
     private void PrepareRoomLocked(Room room, List<GameEvent> events)
@@ -316,9 +329,25 @@ public sealed class GameService : IGameService
         }
     }
 
-    private static JoinRoomResponse ToJoinResponse(Room room, string playerId) => new(room.RoomId, playerId, room.Mode, room.Difficulty, room.Status, ToCards(room), room.CurrentTurn);
+    private static JoinRoomResponse ToJoinResponse(Room room, string playerId) => new(room.RoomId, playerId, room.AccessTokens[playerId], room.Mode, room.Difficulty, room.Status, ToCards(room), room.CurrentTurn);
     private static GameState ToState(Room room) => new(room.RoomId, room.Mode, room.Difficulty, room.Status, room.Players.ToArray(), ToCards(room), room.CurrentTurn, new Dictionary<string, int>(room.Scores), new Dictionary<string, int>(room.Streaks), room.StartedAt, room.Duration);
     private static IReadOnlyList<CardView> ToCards(Room room) => room.Board.Select(x => new CardView(x.Position, x.IsRevealed, x.IsMatched, x.IsRevealed || x.IsMatched ? x.AssetReference : null)).ToArray();
+
+    private static string CreateAccessToken() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+
+    private static string? FindPlayerByToken(Room room, string accessToken)
+    {
+        if (string.IsNullOrWhiteSpace(accessToken)) return null;
+        foreach (var entry in room.AccessTokens)
+        {
+            try
+            {
+                if (CryptographicOperations.FixedTimeEquals(Convert.FromHexString(entry.Value), Convert.FromHexString(accessToken))) return entry.Key;
+            }
+            catch (FormatException) { return null; }
+        }
+        return null;
+    }
 
     private sealed class Room(string roomId, GameMode mode, GameDifficulty difficulty)
     {
@@ -330,6 +359,7 @@ public sealed class GameService : IGameService
         public List<AssetManifestEntry> PublicAssets { get; } = [];
         public AssetManifest? Manifest { get; set; }
         public List<string> Players { get; } = [];
+        public Dictionary<string, string> AccessTokens { get; } = new(StringComparer.Ordinal);
         public HashSet<string> ReadyPlayers { get; } = [];
         public Dictionary<string, int> Scores { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, int> Streaks { get; } = new(StringComparer.Ordinal);
