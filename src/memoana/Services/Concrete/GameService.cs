@@ -142,6 +142,30 @@ public sealed class GameService : IGameService
         lock (room.Gate) return ToState(room);
     }
 
+    public IReadOnlyList<RoomEvents> ExpireDueRooms()
+    {
+        var expired = new List<RoomEvents>();
+        lock (_roomsGate)
+        {
+            foreach (var room in _rooms.Values)
+            {
+                lock (room.Gate)
+                {
+                    if (room.Mode != GameMode.Time || room.Status != GameStatus.Playing ||
+                        room.StartedAt is null || room.Duration is null ||
+                        DateTimeOffset.UtcNow - room.StartedAt < room.Duration)
+                        continue;
+
+                    var events = new List<GameEvent>();
+                    FinishRoomLocked(room, events, "time_expired");
+                    expired.Add(new RoomEvents(room.RoomId, events));
+                }
+            }
+        }
+
+        return expired;
+    }
+
     private GameOperationResult FlipCardLocked(Room room, string playerId, int position)
     {
         if (position < 0 || position >= room.Board.Count) return GameOperationResult.Failure("invalid_position", "The card position is invalid.");

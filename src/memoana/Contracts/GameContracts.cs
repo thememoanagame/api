@@ -72,6 +72,7 @@ public sealed record GameStarted(string RoomId, DateTimeOffset StartedAt, TimeSp
 public sealed record GameError(string Code, string Message);
 
 public sealed record GameEvent(string Name, object Payload);
+public sealed record RoomEvents(string RoomId, IReadOnlyList<GameEvent> Events);
 
 public sealed class GameOperationResult
 {

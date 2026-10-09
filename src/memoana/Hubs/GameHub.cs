@@ -8,6 +8,10 @@ public sealed class GameHub(IGameService gameService) : Hub
 {
     public async Task<GameOperationResult> JoinRoom(string roomId)
     {
+        if (Context.Items.TryGetValue("roomId", out var existingRoom) &&
+            !string.Equals(existingRoom?.ToString(), roomId, StringComparison.OrdinalIgnoreCase))
+            return await Reject(GameOperationResult.Failure("already_in_room", "This connection already belongs to another room."));
+
         var result = gameService.JoinRoom(roomId, Context.ConnectionId);
         if (!result.Succeeded) return await Reject(result);
         Context.Items["roomId"] = roomId;
@@ -23,6 +27,7 @@ public sealed class GameHub(IGameService gameService) : Hub
         {
             await Publish(roomId, result.Events);
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, roomId);
+            Context.Items.Remove("roomId");
         }
         return result;
     }
@@ -47,7 +52,11 @@ public sealed class GameHub(IGameService gameService) : Hub
         foreach (var roomId in rooms.Where(x => !string.IsNullOrWhiteSpace(x)))
         {
             var result = gameService.LeaveRoom(roomId!, Context.ConnectionId);
-            if (result.Succeeded) await Publish(roomId!, result.Events);
+            if (result.Succeeded)
+            {
+                await Publish(roomId!, result.Events);
+                Context.Items.Remove("roomId");
+            }
         }
         await base.OnDisconnectedAsync(exception);
     }

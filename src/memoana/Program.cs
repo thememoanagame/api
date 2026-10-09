@@ -9,6 +9,7 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IGameService, GameService>();
+builder.Services.AddHostedService<memoana.Services.Concrete.GameExpiryService>();
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -17,7 +18,6 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
 app.UseAuthorization();
 
 app.MapControllers();

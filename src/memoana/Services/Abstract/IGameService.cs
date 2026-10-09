@@ -10,4 +10,5 @@ public interface IGameService
     GameOperationResult LeaveRoom(string roomId, string playerId);
     GameOperationResult FlipCard(string roomId, string playerId, int position);
     GameState? GetState(string roomId);
+    IReadOnlyList<RoomEvents> ExpireDueRooms();
 }
