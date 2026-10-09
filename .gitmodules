@@ -1,0 +1,3 @@
+[submodule "modules/themes"]
+	path = modules/themes
+	url = https://github.com/thememoanagame/themes.git
