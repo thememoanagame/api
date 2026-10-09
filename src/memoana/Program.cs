@@ -8,7 +8,10 @@ builder.Services.AddControllers().AddJsonOptions(options =>
     options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
-builder.Services.AddSingleton<IGameService, GameService>();
+builder.Services.AddHttpClient<IThemeProvider, StaticThemeProvider>();
+builder.Services.AddSingleton<GameService>();
+builder.Services.AddSingleton<IGameService>(sp => sp.GetRequiredService<GameService>());
+builder.Services.AddSingleton<IGameAssetService, GameAssetService>();
 builder.Services.AddHostedService<memoana.Services.Concrete.GameExpiryService>();
 var app = builder.Build();
 

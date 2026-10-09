@@ -32,9 +32,9 @@ public sealed class GameHub(IGameService gameService) : Hub
         return result;
     }
 
-    public async Task<GameOperationResult> Ready(string roomId)
+    public async Task<GameOperationResult> AssetsReady(string roomId)
     {
-        var result = gameService.Ready(roomId, Context.ConnectionId);
+        var result = gameService.AssetsReady(roomId, Context.ConnectionId);
         if (result.Succeeded) await Publish(roomId, result.Events);
         return result;
     }

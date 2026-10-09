@@ -41,6 +41,9 @@ public sealed record JoinRoomResponse(
     IReadOnlyList<CardView> Board,
     string? CurrentTurn);
 
+public sealed record AssetManifest(string RoomId, IReadOnlyList<AssetManifestEntry> Assets);
+public sealed record AssetManifestEntry(string AssetToken, string ContentType, long Size);
+
 public sealed record CardView(
     int Position,
     bool IsRevealed,
@@ -69,6 +72,8 @@ public sealed record GameFinished(string RoomId, IReadOnlyDictionary<string, int
 public sealed record PlayerJoined(string RoomId, string PlayerId);
 public sealed record PlayerLeft(string RoomId, string PlayerId);
 public sealed record GameStarted(string RoomId, DateTimeOffset StartedAt, TimeSpan? Duration);
+public sealed record AssetsAvailable(string RoomId, AssetManifest Manifest);
+public sealed record AssetsReady(string RoomId, string PlayerId);
 public sealed record GameError(string Code, string Message);
 
 public sealed record GameEvent(string Name, object Payload);

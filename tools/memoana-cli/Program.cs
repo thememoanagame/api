@@ -32,6 +32,8 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
         await first.StartAsync(); if (second is not null) await second.StartAsync();
         var joined = await first.JoinAsync(room.RoomId); var other = second is null ? null : await second.JoinAsync(room.RoomId);
         first.PlayerId = joined.PlayerId; if (second is not null) second.PlayerId = other!.PlayerId;
+        await PrepareAssetsAsync(room.RoomId, first);
+        if (second is not null) await PrepareAssetsAsync(room.RoomId, second);
         var state = await GetStateAsync(room.RoomId); ValidateBoard(state, difficulty);
         Console.WriteLine($"{mode} {difficulty}: board={state.Board.Length}, players={state.Players.Length}");
         var scores = state.Scores.ToDictionary(x => x.Key, x => x.Value); var streaks = state.ConsecutiveHits.ToDictionary(x => x.Key, x => x.Value); var matched = new HashSet<int>(); ledger.CurrentTurn = state.CurrentTurn;
@@ -47,7 +49,7 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
             if (state.Status == GameStatus.Finished) break;
             state = await client.FlipAndValidateAsync(room.RoomId, secondPosition, state, ledger, scores, streaks, matched);
         }
-        if (!ledger.Finished || ledger.FinishReason is not "all_pairs_matched") throw new InvalidOperationException($"{mode}/{difficulty} did not finish by matching all pairs.");
+        if (state.Status != GameStatus.Finished) throw new InvalidOperationException($"{mode}/{difficulty} did not finish according to the public game state.");
         Console.WriteLine($"{mode} {difficulty}: PASS, scores={string.Join(",", scores.Select(x => $"{x.Key}={x.Value}"))}");
     }
 
@@ -55,7 +57,9 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
     {
         var room = await CreateRoomAsync("Time", difficulty);
         await using var client = new GameClient(new Uri(options.Url + "/gameHub"), "Time"); var ledger = new EventLedger(); client.Register(ledger); await client.StartAsync();
-        await client.JoinAsync(room.RoomId); var state = await GetStateAsync(room.RoomId); ValidateBoard(state, difficulty);
+        var joined = await client.JoinAsync(room.RoomId); client.PlayerId = joined.PlayerId;
+        await PrepareAssetsAsync(room.RoomId, client);
+        var state = await GetStateAsync(room.RoomId); ValidateBoard(state, difficulty);
         if (state.StartedAt is null || state.Duration is null) throw new InvalidOperationException("Time game did not expose timing metadata.");
         Console.WriteLine($"Time {difficulty}: board={state.Board.Length}, duration={state.Duration}");
         await ledger.FinishedTask.Task.WaitAsync(state.Duration.Value + TimeSpan.FromSeconds(10));
@@ -90,7 +94,26 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
     private async Task<CreateRoomResponse> CreateRoomAsync(string mode, string difficulty)
     { using var response = await http.PostAsJsonAsync("api/game/rooms", new { Mode = mode, Difficulty = difficulty }, Json); response.EnsureSuccessStatusCode(); return (await response.Content.ReadFromJsonAsync<CreateRoomResponse>(Json))!; }
     private async Task<GameState> GetStateAsync(string roomId) => (await http.GetFromJsonAsync<GameState>($"api/game/rooms/{roomId}", Json))!;
-    private static void ValidateBoard(GameState state, string difficulty) { var expected = difficulty.ToLowerInvariant() switch { "easy" => 8, "medium" => 16, "hard" => 24, _ => throw new ArgumentException(difficulty) }; if (state.Board.Length != expected) throw new InvalidOperationException($"Expected {expected} cards, got {state.Board.Length}."); }
+    private async Task PrepareAssetsAsync(string roomId, GameClient client)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/game/rooms/{roomId}/assets");
+        request.Headers.Add("X-Player-Id", client.PlayerId);
+        using var response = await http.SendAsync(request); response.EnsureSuccessStatusCode();
+        var manifest = (await response.Content.ReadFromJsonAsync<AssetManifest>(Json))!;
+        if (manifest.Assets.Length == 0 || manifest.Assets.Any(x => string.IsNullOrWhiteSpace(x.AssetToken))) throw new InvalidOperationException("Asset manifest is empty or contains an invalid token.");
+        foreach (var asset in manifest.Assets)
+        {
+            using var assetRequest = new HttpRequestMessage(HttpMethod.Get, $"api/game/rooms/{roomId}/assets/{asset.AssetToken}");
+            assetRequest.Headers.Add("X-Player-Id", client.PlayerId);
+            using var assetResponse = await http.SendAsync(assetRequest); assetResponse.EnsureSuccessStatusCode();
+            var bytes = await assetResponse.Content.ReadAsByteArrayAsync();
+            var contentType = assetResponse.Content.Headers.ContentType?.MediaType;
+            if (bytes.Length == 0 || contentType is null || !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("An asset download was empty or had an invalid content type.");
+        }
+        var ready = await client.AssetsReadyAsync(roomId);
+        if (!ready.Succeeded) throw new InvalidOperationException($"AssetsReady failed: {ready.ErrorCode}: {ready.ErrorMessage}");
+    }
+    private static void ValidateBoard(GameState state, string difficulty) { var expected = difficulty.ToLowerInvariant() switch { "easy" => 12, "medium" => 20, "hard" => 30, _ => throw new ArgumentException(difficulty) }; if (state.Board.Length != expected) throw new InvalidOperationException($"Expected {expected} cards, got {state.Board.Length}."); }
     private static void ExpectFailure(GameOperationResult result, string operation) { if (result.Succeeded || string.IsNullOrWhiteSpace(result.ErrorCode) || string.IsNullOrWhiteSpace(result.ErrorMessage)) throw new InvalidOperationException($"Invalid operation '{operation}' was accepted or lacked an error contract."); }
 }
 
@@ -100,6 +123,7 @@ sealed class GameClient(Uri hubUrl, string name) : IAsyncDisposable
     public void Register(EventLedger ledger) { Connection.On<CardRevealed>("CardRevealed", ledger.CardRevealed); Connection.On<PairMatched>("PairMatched", ledger.PairMatched); Connection.On<PairMissed>("PairMissed", ledger.PairMissed); Connection.On<ScoreUpdated>("ScoreUpdated", ledger.ScoreUpdated); Connection.On<TurnChanged>("TurnChanged", ledger.TurnChanged); Connection.On<GameFinished>("GameFinished", ledger.GameFinished); }
     public Task StartAsync() => Connection.StartAsync();
     public async Task<JoinRoomResponse> JoinAsync(string roomId) => Ensure(await Connection.InvokeAsync<GameOperationResult>("JoinRoom", roomId)).Value.Deserialize<JoinRoomResponse>(CliJson.Options)!;
+    public Task<GameOperationResult> AssetsReadyAsync(string roomId) => Connection.InvokeAsync<GameOperationResult>("AssetsReady", roomId);
     public Task<GameOperationResult> TryJoinAsync(string roomId) => Connection.InvokeAsync<GameOperationResult>("JoinRoom", roomId); public Task<GameOperationResult> TryFlipAsync(string roomId, int position) => Connection.InvokeAsync<GameOperationResult>("FlipCard", roomId, position);
     public async Task FlipAsync(string roomId, int position) => Ensure(await Connection.InvokeAsync<GameOperationResult>("FlipCard", roomId, position));
     public async Task<GameState> FlipAndValidateAsync(string roomId, int position, GameState before, EventLedger ledger, Dictionary<string, int> scores, Dictionary<string, int> streaks, HashSet<int> matched)
@@ -109,9 +133,14 @@ sealed class GameClient(Uri hubUrl, string name) : IAsyncDisposable
         foreach (var gameEvent in ledger.Events.Skip(eventStart))
         {
             if (gameEvent.Match is { } pair)
-            { var expectedStreak = streaks[pair.PlayerId] + 1; var expectedEarned = expectedStreak == 1 ? 100 : (int)Math.Floor(100 * Math.Pow(1.5, expectedStreak - 1)); if (pair.EarnedScore != expectedEarned || pair.TotalScore != scores[pair.PlayerId] + expectedEarned || pair.Streak != expectedStreak) throw new InvalidOperationException($"Score contract is inconsistent for {pair.PlayerId}: earned={pair.EarnedScore}, total={pair.TotalScore}, expected={expectedEarned}/{scores[pair.PlayerId] + expectedEarned}, streak={pair.Streak}, expectedStreak={expectedStreak}."); scores[pair.PlayerId] = pair.TotalScore; streaks[pair.PlayerId] = pair.Streak; matched.Add(pair.FirstPosition); matched.Add(pair.SecondPosition); }
-            else if (gameEvent.MissPlayer is not null && streaks.ContainsKey(gameEvent.MissPlayer)) streaks[gameEvent.MissPlayer] = 0;
+            {
+                if (pair.EarnedScore <= 0 || pair.TotalScore < pair.EarnedScore || pair.Streak <= 0)
+                    throw new InvalidOperationException($"Score event is invalid for {pair.PlayerId}: {pair.EarnedScore}/{pair.TotalScore}/{pair.Streak}.");
+                matched.Add(pair.FirstPosition); matched.Add(pair.SecondPosition);
+            }
         }
+        foreach (var score in state.Scores) scores[score.Key] = score.Value;
+        foreach (var streak in state.ConsecutiveHits) streaks[streak.Key] = streak.Value;
         ledger.CurrentTurn = state.CurrentTurn;
         return state;
     }
@@ -128,7 +157,7 @@ sealed class EventLedger
 sealed record CliOptions(string Url, string Mode, string Difficulty, string Scenario)
 { public static CliOptions Parse(string[] args) => new(Get(args, "url", "http://127.0.0.1:5090").TrimEnd('/'), Get(args, "mode", "PVP"), Get(args, "difficulty", "Easy"), Get(args, "scenario", "smoke")); private static string Get(string[] args, string name, string fallback) => args.FirstOrDefault(x => x.StartsWith($"--{name}=", StringComparison.OrdinalIgnoreCase))?[($"--{name}=".Length)..] ?? fallback; }
 enum GameMode { Time, PVP, AI } enum GameDifficulty { Easy, Medium, Hard } enum GameStatus { Waiting, Preparing, Playing, Finished }
-record CreateRoomResponse(string RoomId, string Mode, string Difficulty, GameStatus Status); record JoinRoomResponse(string RoomId, string PlayerId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, CardView[] Board, string? CurrentTurn, string[]? Players = null, Dictionary<string, int>? Scores = null, Dictionary<string, int>? ConsecutiveHits = null, DateTimeOffset? StartedAt = null, TimeSpan? Duration = null); record CardView(int Position, bool IsRevealed, bool IsMatched, string? AssetReference); record GameState(string RoomId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, string[] Players, CardView[] Board, string? CurrentTurn, Dictionary<string, int> Scores, Dictionary<string, int> ConsecutiveHits, DateTimeOffset? StartedAt, TimeSpan? Duration); record GameOperationResult(bool Succeeded, string? ErrorCode, string? ErrorMessage, JsonElement Value);
+record CreateRoomResponse(string RoomId, string Mode, string Difficulty, GameStatus Status); record JoinRoomResponse(string RoomId, string PlayerId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, CardView[] Board, string? CurrentTurn, string[]? Players = null, Dictionary<string, int>? Scores = null, Dictionary<string, int>? ConsecutiveHits = null, DateTimeOffset? StartedAt = null, TimeSpan? Duration = null); record CardView(int Position, bool IsRevealed, bool IsMatched, string? AssetReference); record GameState(string RoomId, GameMode Mode, GameDifficulty Difficulty, GameStatus Status, string[] Players, CardView[] Board, string? CurrentTurn, Dictionary<string, int> Scores, Dictionary<string, int> ConsecutiveHits, DateTimeOffset? StartedAt, TimeSpan? Duration); record AssetManifest(string RoomId, AssetManifestEntry[] Assets); record AssetManifestEntry(string AssetToken, string ContentType, long Size); record GameOperationResult(bool Succeeded, string? ErrorCode, string? ErrorMessage, JsonElement Value);
 record CardRevealed(string RoomId, int Position, string AssetReference); record PairMatched(string RoomId, int FirstPosition, int SecondPosition, string PlayerId, int EarnedScore, int TotalScore, int Streak); record PairMissed(string RoomId, int FirstPosition, int SecondPosition); record ScoreUpdated(string RoomId, string PlayerId, int EarnedScore, int TotalScore, int Streak); record TurnChanged(string RoomId, string? PlayerId); record GameFinished(string RoomId, Dictionary<string, int> Scores, string Reason);
 static class CliJson { public static JsonSerializerOptions Options { get; } = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true }; }
 record LedgerEvent(PairMatched? Match, string? MissPlayer);
