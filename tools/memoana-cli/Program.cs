@@ -61,6 +61,14 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
         await PrepareAssetsAsync(room.RoomId, client);
         var state = await GetStateAsync(room.RoomId); ValidateBoard(state, difficulty);
         if (state.StartedAt is null || state.Duration is null) throw new InvalidOperationException("Time game did not expose timing metadata.");
+        var expectedDuration = difficulty.ToLowerInvariant() switch
+        {
+            "easy" => TimeSpan.FromSeconds(75),
+            "medium" => TimeSpan.FromSeconds(100),
+            "hard" => TimeSpan.FromSeconds(150),
+            _ => throw new ArgumentException(difficulty)
+        };
+        if (state.Duration != expectedDuration) throw new InvalidOperationException($"Expected Time duration {expectedDuration}, got {state.Duration}.");
         Console.WriteLine($"Time {difficulty}: board={state.Board.Length}, duration={state.Duration}");
         await ledger.FinishedTask.Task.WaitAsync(state.Duration.Value + TimeSpan.FromSeconds(10));
         if (ledger.FinishReason != "time_expired") throw new InvalidOperationException("Time game finished for an unexpected reason.");

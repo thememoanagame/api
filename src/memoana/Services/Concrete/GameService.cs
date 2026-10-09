@@ -23,9 +23,9 @@ public sealed class GameService : IGameService
     };
     private static readonly IReadOnlyDictionary<GameDifficulty, TimeSpan> TimeLimits = new Dictionary<GameDifficulty, TimeSpan>
     {
-        [GameDifficulty.Easy] = TimeSpan.FromMinutes(5),
-        [GameDifficulty.Medium] = TimeSpan.FromMinutes(3),
-        [GameDifficulty.Hard] = TimeSpan.FromMinutes(2)
+        [GameDifficulty.Easy] = TimeSpan.FromSeconds(75),
+        [GameDifficulty.Medium] = TimeSpan.FromSeconds(100),
+        [GameDifficulty.Hard] = TimeSpan.FromSeconds(150)
     };
 
     private readonly object _roomsGate = new();
