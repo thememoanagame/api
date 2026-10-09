@@ -1,0 +1,6 @@
+@memoana_HostAddress = http://localhost:5274
+
+GET {{memoana_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
