@@ -9,11 +9,11 @@ public sealed class GameService : IGameService
     private readonly IThemeProvider _themeProvider;
     private const int BaseScore = 100;
     private const double ScoreMultiplier = 1.5;
-    private static readonly IReadOnlyDictionary<GameDifficulty, int> CardCounts = new Dictionary<GameDifficulty, int>
+    private static readonly IReadOnlyDictionary<GameDifficulty, int> PairCounts = new Dictionary<GameDifficulty, int>
     {
-        [GameDifficulty.Easy] = 12,
-        [GameDifficulty.Medium] = 20,
-        [GameDifficulty.Hard] = 30
+        [GameDifficulty.Easy] = 6,
+        [GameDifficulty.Medium] = 10,
+        [GameDifficulty.Hard] = 15
     };
     private static readonly IReadOnlyDictionary<GameDifficulty, double> AiAccuracy = new Dictionary<GameDifficulty, double>
     {
@@ -35,7 +35,7 @@ public sealed class GameService : IGameService
 
     public GameOperationResult CreateRoom(CreateRoomRequest request)
     {
-        if (!CardCounts.ContainsKey(request.Difficulty))
+        if (!PairCounts.ContainsKey(request.Difficulty))
             return GameOperationResult.Failure("invalid_difficulty", "Difficulty is not supported.");
 
         var room = new Room(CreateRoomId(), request.Mode, request.Difficulty);
@@ -256,7 +256,7 @@ public sealed class GameService : IGameService
         if (room.Status is not GameStatus.Waiting) return;
         room.Status = GameStatus.Preparing;
         events.Add(new("GamePreparing", new { room.RoomId }));
-        var pairCount = CardCounts[room.Difficulty] / 2;
+        var pairCount = PairCounts[room.Difficulty];
         var selected = _themeProvider.SelectAssets(pairCount);
         if (selected.Count < pairCount) throw new InvalidOperationException("The theme does not contain enough playable assets.");
         foreach (var asset in selected)
@@ -279,7 +279,7 @@ public sealed class GameService : IGameService
 
     private static void StartRoomLocked(Room room, List<GameEvent> events)
     {
-        if (room.Status is not (GameStatus.Preparing or GameStatus.Finished)) return;
+        if (room.Status is not GameStatus.Preparing) return;
         room.CurrentTurn = room.Players[0];
         room.StartedAt = DateTimeOffset.UtcNow;
         room.Duration = room.Mode == GameMode.Time ? TimeLimits[room.Difficulty] : null;

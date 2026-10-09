@@ -3,57 +3,49 @@ using memoana.Services.Abstract;
 
 namespace memoana.Services.Concrete;
 
-/// <summary>Reads the static metadata and WebP resources from the local submodule or GitHub Pages.</summary>
-public sealed class StaticThemeProvider(IConfiguration configuration, IWebHostEnvironment environment, HttpClient httpClient) : IThemeProvider
+/// <summary>Reads the generated static theme contract from the checked-out themes submodule.</summary>
+public sealed class StaticThemeProvider(IConfiguration configuration, IWebHostEnvironment environment) : IThemeProvider
 {
     public IReadOnlyList<ThemeAsset> SelectAssets(int count)
     {
-        var themeId = configuration["Themes:DefaultTheme"] ?? "01a0bbbe-e0f4-7251-86c8-cc9bc84703d0";
-        var root = configuration["Themes:RootPath"];
-        var baseUrl = configuration["Themes:BaseUrl"]?.TrimEnd('/');
-        if (!string.IsNullOrWhiteSpace(root))
-            return SelectFromFileSystem(count, themeId, root);
-        if (string.IsNullOrWhiteSpace(baseUrl))
-            throw new InvalidOperationException("Themes requires either RootPath or BaseUrl.");
-        return SelectFromStaticSite(count, themeId, baseUrl);
-    }
+        if (count <= 0) throw new ArgumentOutOfRangeException(nameof(count));
+        var themeId = configuration["Themes:DefaultTheme"] ?? throw new InvalidOperationException("Themes:DefaultTheme is required.");
+        if (!Guid.TryParse(themeId, out var parsedThemeId)) throw new InvalidOperationException($"The configured theme id '{themeId}' is not a GUID.");
+        var configuredRoot = configuration["Themes:RootPath"] ?? throw new InvalidOperationException("Themes:RootPath must point to the local themes submodule.");
+        var root = Path.GetFullPath(Path.IsPathRooted(configuredRoot) ? configuredRoot : Path.Combine(environment.ContentRootPath, configuredRoot));
+        if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"The local themes root does not exist: {root}");
 
-    private IReadOnlyList<ThemeAsset> SelectFromFileSystem(int count, string themeId, string configuredRoot)
-    {
-        var root = Path.IsPathRooted(configuredRoot) ? configuredRoot : Path.GetFullPath(Path.Combine(environment.ContentRootPath, configuredRoot));
-        var manifestJson = File.ReadAllText(Path.Combine(root, "data", themeId, "manifest.json"));
-        var cardsJson = File.ReadAllText(Path.Combine(root, "data", themeId, "cards.json"));
-        return SelectAssets(count, themeId, manifestJson, cardsJson, file => File.ReadAllBytes(Path.Combine(root, "assets", themeId, file)));
-    }
+        var canonicalThemeId = parsedThemeId.ToString("D");
+        var themeRoot = Path.Combine(root, "assets", canonicalThemeId);
+        var dataRoot = Path.Combine(root, "data", canonicalThemeId);
+        var manifestPath = Path.Combine(dataRoot, "manifest.json");
+        var cardsPath = Path.Combine(dataRoot, "cards.json");
+        if (!File.Exists(manifestPath) || !File.Exists(cardsPath)) throw new InvalidOperationException($"Theme '{canonicalThemeId}' is missing generated metadata.");
 
-    private IReadOnlyList<ThemeAsset> SelectFromStaticSite(int count, string themeId, string baseUrl)
-    {
-        var manifestJson = httpClient.GetStringAsync($"{baseUrl}/data/{themeId}/manifest.json").GetAwaiter().GetResult();
-        var cardsJson = httpClient.GetStringAsync($"{baseUrl}/data/{themeId}/cards.json").GetAwaiter().GetResult();
-        return SelectAssets(count, themeId, manifestJson, cardsJson, file =>
-        {
-            var bytes = httpClient.GetByteArrayAsync($"{baseUrl}/assets/{themeId}/{file}").GetAwaiter().GetResult();
-            return bytes;
-        });
-    }
+        using var manifest = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        var manifestRoot = manifest.RootElement;
+        if (!string.Equals(manifestRoot.GetProperty("id").GetString(), canonicalThemeId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(manifestRoot.GetProperty("assetDirectory").GetString(), $"/assets/{canonicalThemeId}/", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(manifestRoot.GetProperty("validationStatus").GetString(), "valid", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Theme '{canonicalThemeId}' has an invalid manifest.");
 
-    private static IReadOnlyList<ThemeAsset> SelectAssets(int count, string themeId, string manifestJson, string cardsJson, Func<string, byte[]> readAsset)
-    {
-        using var manifest = JsonDocument.Parse(manifestJson);
-        if (!string.Equals(manifest.RootElement.GetProperty("id").GetString(), themeId, StringComparison.OrdinalIgnoreCase) ||
-            manifest.RootElement.GetProperty("cardCount").GetInt32() < count)
-            throw new InvalidOperationException("The configured theme does not provide enough valid cards.");
-
-        using var cards = JsonDocument.Parse(cardsJson);
+        using var cards = JsonDocument.Parse(File.ReadAllText(cardsPath));
         var entries = cards.RootElement.GetProperty("cards").EnumerateArray().ToArray();
-        if (entries.Length < count) throw new InvalidOperationException("The configured theme has fewer cards than required.");
-        return entries.OrderBy(_ => Random.Shared.Next()).Take(count).Select(entry =>
+        var declaredCount = manifestRoot.GetProperty("cardCount").GetInt32();
+        if (declaredCount != entries.Length || entries.Length < count) throw new InvalidOperationException($"Theme '{canonicalThemeId}' provides {entries.Length} cards; {count} are required.");
+
+        var available = entries.Select(entry =>
         {
-            var id = entry.GetProperty("id").GetString()!;
-            var file = entry.GetProperty("file").GetString()!;
-            var bytes = readAsset(file);
-            if (bytes.Length == 0) throw new InvalidOperationException($"Theme asset '{id}' is empty.");
-            return new ThemeAsset(id, "image/webp", bytes);
+            var sourceId = entry.GetProperty("id").GetString();
+            var file = entry.GetProperty("file").GetString();
+            var url = entry.GetProperty("url").GetString();
+            if (!Guid.TryParse(sourceId, out _) || string.IsNullOrWhiteSpace(file) || !string.Equals(url, $"/assets/{canonicalThemeId}/{file}", StringComparison.Ordinal)) throw new InvalidOperationException($"Theme '{canonicalThemeId}' contains invalid card metadata.");
+            var fullPath = Path.GetFullPath(Path.Combine(themeRoot, file));
+            if (!fullPath.StartsWith(Path.GetFullPath(themeRoot + Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) || !string.Equals(Path.GetExtension(fullPath), ".webp", StringComparison.OrdinalIgnoreCase) || !File.Exists(fullPath)) throw new InvalidOperationException($"Theme card '{file}' is not a valid local WebP asset.");
+            var content = File.ReadAllBytes(fullPath);
+            if (content.Length == 0) throw new InvalidOperationException($"Theme card '{file}' is empty.");
+            return new ThemeAsset(sourceId!, "image/webp", content);
         }).ToArray();
+        return available.OrderBy(_ => Random.Shared.Next()).Take(count).ToArray();
     }
 }

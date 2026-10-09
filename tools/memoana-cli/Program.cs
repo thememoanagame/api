@@ -72,8 +72,10 @@ sealed class ValidationRunner(HttpClient http, CliOptions options)
         var room = await CreateRoomAsync("PVP", "Easy");
         await using var one = new GameClient(new Uri(options.Url + "/gameHub"), "invalid-1"); await using var two = new GameClient(new Uri(options.Url + "/gameHub"), "invalid-2"); await using var three = new GameClient(new Uri(options.Url + "/gameHub"), "invalid-3");
         one.Register(new EventLedger()); two.Register(new EventLedger()); three.Register(new EventLedger()); await one.StartAsync(); await two.StartAsync(); await three.StartAsync();
-        ExpectFailure(await one.TryJoinAsync("missing"), "missing room"); var first = await one.JoinAsync(room.RoomId); ExpectFailure(await one.TryFlipAsync(room.RoomId, -1), "flip while waiting");
-        await two.JoinAsync(room.RoomId); ExpectFailure(await two.TryFlipAsync(room.RoomId, 0), "wrong turn"); ExpectFailure(await one.TryFlipAsync(room.RoomId, 999), "position above board"); ExpectFailure(await three.TryJoinAsync(room.RoomId), "room full");
+        ExpectFailure(await one.TryJoinAsync("missing"), "missing room"); var first = await one.JoinAsync(room.RoomId); one.PlayerId = first.PlayerId; ExpectFailure(await one.TryFlipAsync(room.RoomId, -1), "flip while waiting");
+        var second = await two.JoinAsync(room.RoomId); two.PlayerId = second.PlayerId;
+        await PrepareAssetsAsync(room.RoomId, one); await PrepareAssetsAsync(room.RoomId, two);
+        ExpectFailure(await two.TryFlipAsync(room.RoomId, 0), "wrong turn"); ExpectFailure(await one.TryFlipAsync(room.RoomId, 999), "position above board"); ExpectFailure(await three.TryJoinAsync(room.RoomId), "room full");
         await one.FlipAsync(room.RoomId, 0); ExpectFailure(await one.TryFlipAsync(room.RoomId, 0), "already revealed"); Console.WriteLine("Invalid ops: PASS");
     }
 
