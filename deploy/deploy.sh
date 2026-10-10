@@ -96,19 +96,37 @@ for candidate in "${CLOUDFLARED_HOME}/${TUNNEL_ID}.json" "${CLOUDFLARED_ETC}/${T
     if [[ -f "$candidate" ]]; then CREDENTIAL_SOURCE="$candidate"; break; fi
 done
 [[ -n "$CREDENTIAL_SOURCE" ]] || { echo "Missing credentials for tunnel ${TUNNEL_ID}; refusing to overwrite tunnel settings." >&2; exit 1; }
-install -m 0600 "$CREDENTIAL_SOURCE" "${CLOUDFLARED_ETC}/${TUNNEL_ID}.json"
-install -m 0600 "$CREDENTIAL_SOURCE" "${CLOUDFLARED_HOME}/${TUNNEL_ID}.json"
+ETC_CREDENTIAL="${CLOUDFLARED_ETC}/${TUNNEL_ID}.json"
+HOME_CREDENTIAL="${CLOUDFLARED_HOME}/${TUNNEL_ID}.json"
+
+# Never copy/install a file onto itself. Keep /etc as the canonical runtime copy,
+# then mirror it to the home directory so both configs and credentials stay aligned.
+if [[ "$CREDENTIAL_SOURCE" != "$ETC_CREDENTIAL" ]]; then
+    install -m 0600 "$CREDENTIAL_SOURCE" "$ETC_CREDENTIAL"
+fi
+if [[ "$ETC_CREDENTIAL" != "$HOME_CREDENTIAL" ]]; then
+    install -m 0600 "$ETC_CREDENTIAL" "$HOME_CREDENTIAL"
+fi
 
 read -r -p "Public hostname for MemoAna (for example, api.example.com): " HOSTNAME
 HOSTNAME="${HOSTNAME,,}"
 [[ "$HOSTNAME" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || { echo "Invalid hostname: ${HOSTNAME}" >&2; exit 1; }
 
-echo "Creating DNS route ${HOSTNAME} on tunnel ${TUNNEL_ID}..."
-if ! cloudflared tunnel route dns "$TUNNEL_ID" "$HOSTNAME"; then
-    echo "DNS route creation failed (it may already exist or DNS permissions may be missing)."
-    read -r -p "Continue with this hostname anyway? [y/N] " answer
-    [[ "$answer" =~ ^[Yy]$ ]] || exit 1
+echo "Ensuring DNS route ${HOSTNAME} on existing tunnel ${TUNNEL_ID}..."
+dns_output="$(mktemp)"
+if cloudflared tunnel route dns "$TUNNEL_ID" "$HOSTNAME" >"$dns_output" 2>&1; then
+    cat "$dns_output"
+else
+    cat "$dns_output" >&2
+    if grep -Eqi 'already exists|record already exists|already configured|duplicate' "$dns_output"; then
+        echo "DNS route already exists; reusing it."
+    else
+        echo "DNS route creation failed (for example, due to an existing record or missing DNS permissions)."
+        read -r -p "Continue with this hostname anyway? [y/N] " answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { rm -f "$dns_output"; exit 1; }
+    fi
 fi
+rm -f "$dns_output"
 
 if [[ -n "$CONFIG_SOURCE" ]]; then
     if [[ "$CONFIG_SOURCE" != "${CLOUDFLARED_ETC}/config.yml" ]]; then
