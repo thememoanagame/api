@@ -35,7 +35,10 @@ for i,line in enumerate(lines):
         for item in lines[i+1:]:
             if re.match(r"^\s*-\s+",item): break
             p=re.match(r"^\s*path:\s*(.*?)\s*$",item)
-            if p: print(p.group(1).strip("'\\"")); raise SystemExit
+            if p:
+                value = p.group(1).strip()
+                print(value.strip("\'").strip('"'))
+                raise SystemExit
         break
 PYPATH
 )"
