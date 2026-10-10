@@ -15,14 +15,14 @@ RUN dotnet publish src/memoana/memoana.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 
-ENV ASPNETCORE_HTTP_PORTS=8080 \
+ENV ASPNETCORE_HTTP_PORTS=7080 \
     Themes__RootPath=/app/modules/themes/src/themes/wwwroot \
     Persistence__DatabasePath=/data/memoana.db
 
 COPY --from=build /app/publish .
 COPY --from=build /src/modules/themes/src/themes/wwwroot ./modules/themes/src/themes/wwwroot
 
-EXPOSE 8080
+EXPOSE 7080
 VOLUME ["/data"]
 
 ENTRYPOINT ["dotnet", "memoana.dll"]
