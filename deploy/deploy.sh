@@ -163,7 +163,7 @@ route = None
 if ingress is None:
     if lines and lines[-1].strip(): lines.append("")
     lines += ["ingress:", "  - hostname: " + hostname,
-              "    service: http://127.0.0.1:80", "", "  - service: http_status:404"]
+              "    service: http://127.0.0.1:7080", "", "  - service: http_status:404"]
 else:
     end = len(lines)
     for i in range(ingress + 1, len(lines)):
@@ -175,7 +175,7 @@ else:
     route_indent = re.match(r"^([ \t]*)-", block[starts[0]]).group(1) if starts else "  "
     child_indent = route_indent + ("\t" if "\t" in route_indent else "  ")
     route = [f"{route_indent}- hostname: {hostname}",
-             f"{child_indent}service: http://127.0.0.1:80"]
+             f"{child_indent}service: http://127.0.0.1:7080"]
     match_start = next((j for j, line in enumerate(block)
                         if re.match(r"^[ \t]*-[ \t]+hostname:[ \t]*['\"]?" + re.escape(hostname) + r"['\"]?[ \t]*$", line)), None)
     if match_start is not None:
@@ -183,8 +183,8 @@ else:
                           if re.match(r"^[ \t]*-[ \t]+", block[k])), len(block))
         old = block[match_start:match_end]
         service_index = next((k for k, line in enumerate(old) if re.match(r"^[ \t]*service:[ \t]*", line)), None)
-        if service_index is None: old.append(f"{child_indent}service: http://127.0.0.1:80")
-        else: old[service_index] = f"{child_indent}service: http://127.0.0.1:80"
+        if service_index is None: old.append(f"{child_indent}service: http://127.0.0.1:7080")
+        else: old[service_index] = f"{child_indent}service: http://127.0.0.1:7080"
         block[match_start:match_end] = old
     else:
         catchall = next((j for j, line in enumerate(block)
@@ -241,7 +241,7 @@ systemctl restart cloudflared.service
 
 echo
 echo "Deployment complete: https://${HOSTNAME}"
-echo "Nginx origin: http://127.0.0.1:80"
-echo "Docker API: 127.0.0.1:7080 -> container:7080; Nginx HTTP: :80"
+echo "Nginx origin: http://127.0.0.1:7080"
+echo "Docker API: 127.0.0.1:7081 -> container:7080; Nginx HTTP: 127.0.0.1:7080"
 systemctl --no-pager --full status "$SERVICE_NAME"
 systemctl --no-pager --full status cloudflared.service
