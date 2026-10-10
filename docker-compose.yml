@@ -2,7 +2,7 @@ services:
   memoana:
     image: ${DOCKER_REGISTRY-}memoana
     build:
-      context: src/memoana
+      context: .
       dockerfile: Dockerfile
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
@@ -10,7 +10,27 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - memoana_data:/data:ro
+      - memoana_data:/data
+    networks:
+      - tunnel
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    env_file:
+        - .env 
+    restart: unless-stopped
+    depends_on:
+      - memoana
+    networks:
+      - tunnel
+
 volumes:
+  memoana_app:
+    driver: local
   memoana_data:
     driver: local
+
+networks:
+  tunnel:
+    name: tunnel

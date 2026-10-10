@@ -11,11 +11,10 @@ builder.Services.AddControllers().AddJsonOptions(options =>
     options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddOpenApi();
 builder.Services.AddSignalR();
+builder.Services.AddHealthChecks();
 var databasePath = builder.Configuration["Persistence:DatabasePath"] ?? "data/memoana.db";
 if (!Path.IsPathRooted(databasePath)) databasePath = Path.Combine(builder.Environment.ContentRootPath, databasePath);
 Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
-builder.Services.AddHealthChecks();
-
 builder.Services.AddDbContextFactory<MemoAnaDbContext>(options => options.UseSqlite($"Data Source={databasePath}"));
 builder.Services.AddSingleton<IGameStateStore, SqliteGameStateStore>();
 builder.Services.AddSingleton<IThemeProvider, StaticThemeProvider>();
