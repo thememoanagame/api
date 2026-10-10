@@ -111,7 +111,9 @@ if ! cloudflared tunnel route dns "$TUNNEL_ID" "$HOSTNAME"; then
 fi
 
 if [[ -n "$CONFIG_SOURCE" ]]; then
-    cp -p "$CONFIG_SOURCE" "${CLOUDFLARED_ETC}/config.yml"
+    if [[ "$CONFIG_SOURCE" != "${CLOUDFLARED_ETC}/config.yml" ]]; then
+        cp -p "$CONFIG_SOURCE" "${CLOUDFLARED_ETC}/config.yml"
+    fi
 else
     printf 'tunnel: %s\ncredentials-file: /etc/cloudflared/%s.json\n' "$TUNNEL_ID" "$TUNNEL_ID" > "${CLOUDFLARED_ETC}/config.yml"
 fi
