@@ -178,6 +178,9 @@ else:
             before, after = block[:catchall], block[catchall:]
             if before and before[-1].strip(): before.append("")
             block = before + route + [""] + after
+    if not any(re.match(r"^[ \\t]*-[ \\t]+service:[ \\t]*http_status:", line) for line in block):
+        if block and block[-1].strip(): block.append("")
+        block.append(f"{route_indent}- service: http_status:404")
     lines[ingress + 1:end] = block
 
 path.write_text(newline.join(lines).rstrip() + newline, encoding="utf-8")
