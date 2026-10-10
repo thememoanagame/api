@@ -24,11 +24,11 @@ cp -a "$AVAILABLE" "${AVAILABLE}.bak.${STAMP}"
 cp -a "$SERVICE_FILE" "${SERVICE_FILE}.bak.${STAMP}" 2>/dev/null || true
 
 # Publish the container's HTTP port 7080 on host port 7080.
-# Nginx listens on 7081 to avoid colliding with Docker's published port.
+# Nginx listens on port 80; Docker's published API port remains 7080.
 cat > "$AVAILABLE" <<EOF
 server {
-    listen 7081;
-    listen [::]:7081;
+    listen 80;
+    listen [::]:80;
 
     server_name ${HOSTNAME};
 
@@ -86,10 +86,10 @@ for i, line in enumerate(lines):
             break
         if re.match(r"^\s*service\s*:", lines[j]):
             indent = re.match(r"^(\s*)", lines[j]).group(1)
-            lines[j] = indent + "service: http://127.0.0.1:7081"
+            lines[j] = indent + "service: http://127.0.0.1:80"
             break
     else:
-        lines.insert(i + 1, "  service: http://127.0.0.1:7081")
+        lines.insert(i + 1, "  service: http://127.0.0.1:80")
     break
 
 path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -108,5 +108,5 @@ fi
 
 echo "Fix complete."
 echo "Docker HTTP: 127.0.0.1:7080 -> container:7080"
-echo "Nginx HTTP origin for Cloudflare Tunnel: 127.0.0.1:7081"
+echo "Nginx HTTP origin for Cloudflare Tunnel: 127.0.0.1:80"
 echo "Backups were saved with suffix .bak.${STAMP}."
