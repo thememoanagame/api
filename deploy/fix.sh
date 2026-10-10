@@ -147,7 +147,15 @@ import re, sys
 p=Path(sys.argv[1]); host=sys.argv[2]
 lines=p.read_text(encoding="utf-8").splitlines()
 ingress=next((i for i,line in enumerate(lines) if re.match(r"^ingress:\s*$",line)),None)
-if ingress is not None and not any(line.strip()=="path: ^/$" for line in lines[ingress+1:]):
+has_root_route=False
+if ingress is not None:
+    for i,line in enumerate(lines[ingress+1:], ingress+1):
+        host_match=re.match(r"^\s*-\s*hostname:\s*['\"]?([^'\"]+)['\"]?\s*$",line)
+        if not host_match or host_match.group(1).lower()!=host.lower(): continue
+        end=next((j for j in range(i+1,len(lines)) if re.match(r"^\s*-\s+",lines[j])),len(lines))
+        has_root_route=any(item.strip()=="path: ^/$" for item in lines[i+1:end])
+        break
+if ingress is not None and not has_root_route:
     catchall=next((i for i in range(ingress+1,len(lines)) if re.match(r"^\s*-\s+service:\s*http_status:",lines[i])),len(lines))
     lines[catchall:catchall]=[f"  - hostname: {host}", "    path: ^/$", "    service: http://127.0.0.1:7080", ""]
     p.write_text("\n".join(lines).rstrip()+"\n",encoding="utf-8")
