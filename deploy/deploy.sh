@@ -111,6 +111,10 @@ fi
 read -r -p "Public hostname for MemoAna (for example, api.example.com): " HOSTNAME
 HOSTNAME="${HOSTNAME,,}"
 [[ "$HOSTNAME" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || { echo "Invalid hostname: ${HOSTNAME}" >&2; exit 1; }
+read -r -p "Optional root redirect path (for example, /api/health; empty disables): " ROUTE_PATH
+ROUTE_PATH="${ROUTE_PATH%/}"
+[[ -z "$ROUTE_PATH" || "$ROUTE_PATH" == /* ]] || { echo "Path must start with /." >&2; exit 1; }
+[[ "$ROUTE_PATH" != *" "* && "$ROUTE_PATH" != *"?"* && "$ROUTE_PATH" != *"#"* ]] || { echo "Enter a path only, without spaces, query strings, or fragments." >&2; exit 1; }
 
 echo "Ensuring DNS route ${HOSTNAME} on existing tunnel ${TUNNEL_ID}..."
 dns_output="$(mktemp)"
@@ -136,12 +140,12 @@ else
     printf 'tunnel: %s\ncredentials-file: /etc/cloudflared/%s.json\n' "$TUNNEL_ID" "$TUNNEL_ID" > "${CLOUDFLARED_ETC}/config.yml"
 fi
 
-python3 - "${CLOUDFLARED_ETC}/config.yml" "$TUNNEL_ID" "$HOSTNAME" <<'PY'
+python3 - "${CLOUDFLARED_ETC}/config.yml" "$TUNNEL_ID" "$HOSTNAME" "$ROUTE_PATH" <<'PY'
 from pathlib import Path
 import re, sys
 
 path = Path(sys.argv[1])
-tunnel_id, hostname = sys.argv[2:]
+tunnel_id, hostname, route_path = sys.argv[2:]
 text = path.read_text(encoding="utf-8")
 newline = "\r\n" if "\r\n" in text else "\n"
 lines = text.splitlines()
@@ -162,8 +166,15 @@ ingress = next((i for i, line in enumerate(lines) if re.match(r"^ingress:[ \t]*$
 route = None
 if ingress is None:
     if lines and lines[-1].strip(): lines.append("")
-    lines += ["ingress:", "  - hostname: " + hostname,
-              "    service: http://127.0.0.1:7080", "", "  - service: http_status:404"]
+    lines += ["ingress:"]
+    if route_path:
+        lines += ["  - hostname: " + hostname, "    path: ^/$",
+                  "    service: http://127.0.0.1:7080",
+                  "  - hostname: " + hostname, "    path: ^" + re.escape(route_path) + "$",
+                  "    service: http://127.0.0.1:7080", ""]
+    else:
+        lines += ["  - hostname: " + hostname, "    service: http://127.0.0.1:7080", ""]
+    lines += ["  - service: http_status:404"]
 else:
     end = len(lines)
     for i in range(ingress + 1, len(lines)):
@@ -174,8 +185,10 @@ else:
     starts = [i for i, line in enumerate(block) if re.match(r"^[ \t]*-[ \t]+", line)]
     route_indent = re.match(r"^([ \t]*)-", block[starts[0]]).group(1) if starts else "  "
     child_indent = route_indent + ("\t" if "\t" in route_indent else "  ")
-    route = [f"{route_indent}- hostname: {hostname}",
-             f"{child_indent}service: http://127.0.0.1:7080"]
+    route = [f"{route_indent}- hostname: {hostname}"]
+    if route_path:
+        route += [f"{child_indent}path: ^{re.escape(route_path)}$"]
+    route += [f"{child_indent}service: http://127.0.0.1:7080"]
     match_start = next((j for j, line in enumerate(block)
                         if re.match(r"^[ \t]*-[ \t]+hostname:[ \t]*['\"]?" + re.escape(hostname) + r"['\"]?[ \t]*$", line)), None)
     if match_start is not None:
@@ -185,6 +198,9 @@ else:
         service_index = next((k for k, line in enumerate(old) if re.match(r"^[ \t]*service:[ \t]*", line)), None)
         if service_index is None: old.append(f"{child_indent}service: http://127.0.0.1:7080")
         else: old[service_index] = f"{child_indent}service: http://127.0.0.1:7080"
+        old = [line for line in old if not re.match(r"^[ \t]*path:[ \t]*", line)]
+        if route_path:
+            old.insert(1, f"{child_indent}path: ^{re.escape(route_path)}$")
         block[match_start:match_end] = old
     else:
         catchall = next((j for j, line in enumerate(block)
@@ -204,6 +220,19 @@ else:
 path.write_text(newline.join(lines).rstrip() + newline, encoding="utf-8")
 PY
 
+if [[ -n "$ROUTE_PATH" ]]; then
+python3 - "${CLOUDFLARED_ETC}/config.yml" "$HOSTNAME" <<'PYROOT'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1]); host = sys.argv[2]
+lines = p.read_text(encoding="utf-8").splitlines()
+ingress = next((i for i, line in enumerate(lines) if re.match(r"^ingress:\s*$", line)), None)
+if ingress is not None and not any(line.strip() == "path: ^/$" for line in lines[ingress + 1:]):
+    catchall = next((i for i in range(ingress + 1, len(lines)) if re.match(r"^\s*-\s+service:\s*http_status:", lines[i])), len(lines))
+    lines[catchall:catchall] = [f"  - hostname: {host}", "    path: ^/$", "    service: http://127.0.0.1:7080", ""]
+    p.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PYROOT
+fi
 install -m 0600 "${CLOUDFLARED_ETC}/config.yml" "${CLOUDFLARED_HOME}/config.yml"
 
 if ! systemctl cat cloudflared.service >/dev/null 2>&1; then
@@ -229,6 +258,18 @@ fi
 install -m 0644 "$SCRIPT_DIR/memoana-api.service" "/etc/systemd/system/$SERVICE_NAME"
 sed -i "s#${IMAGE_REPOSITORY}:v0.0.1-rc1#${IMAGE}#g" "/etc/systemd/system/$SERVICE_NAME"
 sed "s/__HOSTNAME__/${HOSTNAME}/g" "$SCRIPT_DIR/memoana.conf" > /etc/nginx/sites-available/memoana.conf
+if [[ -n "$ROUTE_PATH" ]]; then
+python3 - "$ROUTE_PATH" /etc/nginx/sites-available/memoana.conf <<'PYNGINX'
+from pathlib import Path
+import sys
+route_path, filename = sys.argv[1:]
+p = Path(filename); text = p.read_text(encoding="utf-8")
+needle = "    location / {"
+redirect = f"    location = / {{\n        return 302 {route_path};\n    }}\n\n"
+if needle not in text: raise SystemExit("Could not add root redirect to Nginx config.")
+p.write_text(text.replace(needle, redirect + needle, 1), encoding="utf-8")
+PYNGINX
+fi
 ln -sfn /etc/nginx/sites-available/memoana.conf /etc/nginx/sites-enabled/memoana.conf
 
 nginx -t
@@ -241,6 +282,7 @@ systemctl restart cloudflared.service
 
 echo
 echo "Deployment complete: https://${HOSTNAME}"
+[[ -n "$ROUTE_PATH" ]] && echo "Root redirect: / -> $ROUTE_PATH"
 echo "Nginx origin: http://127.0.0.1:7080"
 echo "Docker API: 127.0.0.1:7081 -> container:7080; Nginx HTTP: 127.0.0.1:7080"
 systemctl --no-pager --full status "$SERVICE_NAME"
