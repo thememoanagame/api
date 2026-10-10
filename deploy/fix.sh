@@ -89,7 +89,7 @@ for i, line in enumerate(lines):
             lines[j] = indent + "service: http://127.0.0.1:7080"
             break
     else:
-        lines.insert(i + 1, "  service: http://127.0.0.1:80")
+        lines.insert(i + 1, "  service: http://127.0.0.1:7080")
     break
 
 path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
